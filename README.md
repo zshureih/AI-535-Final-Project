@@ -9,6 +9,8 @@ conda create -n "535-final" -y python=3.7
 source activate 535-final 
 
 
+This was compatible with the environment on my local system.
+The minimum pytorch version required for using the Transformer model is 1.2.0, but if you want to use more recent versions go ahead and modify accordingly
 ## install pytorch (cuda recommended)
 conda install pytorch==1.2.0 torchvision==0.4.0 cudatoolkit=10.0 -c pytorch
 
