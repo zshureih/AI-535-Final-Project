@@ -17,5 +17,5 @@ The minimum pytorch version required for using the Transformer model is 1.2.0, b
 
 
 ## install pip and download the data (40GB zip)
-`pip install gdown`
-`gdown https://drive.google.com/uc?id=17v86luM3g0Fo7bU2uzV0i0klvrLRyglB -O eval5_dataset_1_of_6.zip`
+Because of the size of the dataset, you must manually download it from the following [link](https://drive.google.com/uc?id=1GJBM8XleBieZdDrAE_VUDYrfZfbxaelA)
+
