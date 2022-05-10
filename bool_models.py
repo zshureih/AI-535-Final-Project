@@ -219,15 +219,11 @@ class TransformerModel_XYZRGBD(nn.Module):
         
         # in_channels - R,G,B,D,OCCL_MASK,OBJ_MASK, out_channels - 1, 
         self.img_encoder = nn.Sequential(
-                # nn.Conv2d(4, 128, (3, 3), 1, padding=(1,1)),
-                # nn.ReLU(),
-                # Block(128, 128),
               nn.Conv2d(4, 8, (3,3), 1, padding=(1,1)),
               nn.ReLU(),
               nn.Conv2d(8, 64, (3,3), 1),
               nn.ReLU(),
               nn.MaxPool2d((3,3)),
-                # nn.AvgPool2d((100,100))
         )
 
         self.pos_encoder = PositionalEncoding(d_model, dropout)
@@ -262,44 +258,50 @@ class TransformerModel_XYZRGBD(nn.Module):
         self.fc3.weight.data.uniform_(-initrange, initrange)
         self.img_encoder.apply(self.init_cnn_weights)
 
-    def forward(self, src: Tensor, timesteps: Tensor, input_images: Tensor) -> Tensor:
+    def forward(self, src: Tensor, timesteps: Tensor, input_images: Tensor, lengths: Tensor) -> Tensor:
         """
         Args:
             src: Tensor, shape [seq_len, batch_size, D]
-
         Returns:
             output Tensor of shape [seq_len, batch_size, ntoken]
         """
+
         results = []
-        src = src.squeeze(0)
+        # for each scene in batch:
         for i in range(src.size(0)):
-            # every timestep until the object is never seen again
-            inputs = torch.full((src.size(1), self.input_dim - 3), 0.).cuda()
-            for j, t in enumerate(timesteps.squeeze(0)):
-                # grab the frames
-                img_enc = self.img_encoder(input_images[:, j].cuda())
 
-                inputs[t.int() - 1, :] = img_enc.view(-1)
+            # make x the right shape by trimming the extra padding beyond scene length
+            x = src[i, :lengths[i, 0].long()].unsqueeze(0).cuda()
+            images = input_images[i, :lengths[i, 1].long()]
+            time = timesteps[i, :lengths[i, 1].long()]
 
-            # make x the right shape
-            x = src[i]
-            x = x.unsqueeze(0).permute(1, 0, 2)
+            # start processing our images
+            inputs = torch.full((x.size(1), self.input_dim - 3), 0.).cuda()
+            img_enc = self.img_encoder(images.cuda())
+            flattened_enc = torch.reshape(img_enc, (img_enc.shape[0], self.input_dim - 3))
+            inputs[time.long().squeeze() - 1, :] = flattened_enc
+
+            # concat image encodings and xyz values
+            x = torch.cat([inputs.unsqueeze(0), x], axis=-1)
             
-            x = torch.cat((inputs.unsqueeze(1), x), axis=-1)
+            # linear + positional encoding
             x = self.relu(self.xyz_encoder(x))
+            x = self.pos_encoder(x).permute(1, 0, 2)
 
-            x = self.pos_encoder(x)
-            x_mask = generate_square_subsequent_mask(x.size(1)).cuda()
+            # This is super important according to experiments
+            x_mask = generate_square_subsequent_mask(x.size(0)).cuda()
             output = self.transformer_encoder(x, x_mask)
-
+            
             # start classifying the output of the encoder
-            output = self.relu(self.fc1(output.squeeze(1)[-1, :]))
+            output = self.relu(self.fc1(output[-1]))
             output = self.relu(self.fc2(output))
             output = self.sig(self.fc3(output))
+
             results.append(output)
 
-        output = torch.stack(results, dim=0)
-        return output
+        results = torch.stack(results, dim=0)
+
+        return results
 
 def generate_square_subsequent_mask(sz: int) -> Tensor:
     """Generates an upper-triangular matrix of -inf, with zeros on diag."""

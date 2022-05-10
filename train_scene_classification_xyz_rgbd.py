@@ -21,18 +21,22 @@ import json
 
 from torch.utils.tensorboard import SummaryWriter
 
-from bool_models import TransformerModel_XYZRGBD, generate_square_subsequent_mask
-
-torch.multiprocessing.set_sharing_strategy('file_system')
-writer = SummaryWriter("/home/zshureih/MCS/opics/output/logs/xyz_rgbd_model_lr_1e-5")
-
-dataset_dir = "/media/zshureih/Hybrid Drive/eval_5_dataset"
-validation_dir = "/media/zshureih/Hybrid Drive/eval5_dataset_6"
-# dataset_dir = "/media/zshureih/Hybrid Drive/eval5_dataset_6"
+from opics.pvoe.transformer.bool_models import TransformerModel_XYZRGBD, generate_square_subsequent_mask
 
 SEQUENCE_FEATURES = ["3d_pos_x","3d_pos_y","3d_pos_z", "2d_bbox_x", "2d_bbox_y", "2d_bbox_w", "2d_bbox_h", "timestep"]
 IMG_FEATURES = []
 SEQUENCE_DIM = len(SEQUENCE_FEATURES)
+batch_size = 12
+lr = 1e-5
+
+torch.multiprocessing.set_sharing_strategy('file_system')
+writer = SummaryWriter(f"/home/zshureih/MCS/opics/output/logs/pretrained_batch_{batch_size}_xyz_rgbd_model_lr_{lr}")
+
+dataset_dir = "C:\Users\Zeyad\AI-535-Final-Project\eval_5_dataset1"
+# dataset_dir = "/nfs/hpc/share/shureihz/opics_data/eval5_dataset_1"
+validation_dir = "C:\Users\Zeyad\AI-535-Final-Project\eval_5_dataset6"
+
+pretrained_weights = "/home/zshureih/MCS/opics/output/ckpts/13_mask_when_hidden_xyz_plus_rgbd_model_all_5.pth"
 
 # define the features coming out of gt.txt
 features = [
@@ -110,11 +114,11 @@ def get_dataset(eval=False):
                 else:
                     non_actors.append(id)
 
-            # if len(non_actors) == 2 and "coll_" in scene_name and "_plaus" in scene_name:
-            #     # flip a coin and remove a non_actor
-            #     flip = np.random.randint(0, 2)
-            #     non_actors.remove(non_actors[flip])
-            
+            if len(non_actors) == 2 and "coll_" in scene_name and "_plaus" in scene_name:
+                # flip a coin and remove a non_actor
+                flip = np.random.randint(0, 2)
+                non_actors.remove(non_actors[flip])
+
             if len(non_actors) != 1:
                 scenes = scenes[scenes != scene_name]
                 continue
@@ -222,7 +226,7 @@ class MCS_Sequence_Dataset(Dataset):
             axs[0, i].imshow(np.asarray(img))
             axs[0, i].set(xticklabels=[], yticklabels=[], xticks=[], yticks=[])
 
-    def get_image_channels(self, n, bboxes, timesteps, scene_name, pad=75, root=dataset_dir):
+    def get_image_channels(self, n, bboxes, timesteps, scene_name, pad=100, root=dataset_dir):
         class ShiftToMean(object):
             def __call__(self, image):
                 temp = torch.Tensor([104/255,117/255,124/255]).repeat(image.size(1),image.size(2),1).permute(2, 0, 1)
@@ -345,17 +349,28 @@ class MCS_Sequence_Dataset(Dataset):
         return src, time, rgb_images, depth_images
 
     def __getitem__(self, index):
-        # get the scene
         scene = self.data[index]
         track_lengths = self.lengths[index]
         scene_name = self.scene_names[index]
 
         src, timesteps, rgb, depth = self.cook_tracks(scene, track_lengths, scene_name[0], self.eval)
+        
+        plausibility = Tensor([1]) if "_plaus" in scene_name[0] else Tensor([0])
 
         input_image = torch.cat([rgb, depth], axis=1)
 
-        return src, timesteps, input_image, scene_name[0]
+        length = Tensor([src.size(1), timesteps.size(0)])
 
+        item = torch.full((self.max_length, 3), 99.)
+        item[:src.size(1), :] = src.squeeze()
+
+        time = torch.full((self.max_length, 1), -1)
+        time[:timesteps.size(0)] = timesteps.unsqueeze(1)
+
+        images = torch.zeros((self.max_length, 4, 100, 100))
+        images[:timesteps.size(0)] = input_image
+
+        return item, time, images, length, plausibility, scene_name[0]
 
 def eval(model, val_set, export_flag=False):
     model.eval()
@@ -371,46 +386,47 @@ def eval(model, val_set, export_flag=False):
 
     with torch.no_grad():
         for i, output in enumerate(tqdm(val_set)):
-            src, timesteps, input_images, scene_name = output[0], output[1], output[2], output[3]
+            src, timesteps, input_images, length, plausibility, scene_name = output[0], output[1], output[2], output[3], output[4], output[5]
+        
+            output = model(src, timesteps, input_images, length)
             
-            plausibility = Tensor([1]) if "_plaus" in scene_name[0] else Tensor([0])
-            output = model(src.cuda(), timesteps, input_images)
-            
-            loss = criterion(output.squeeze(0), plausibility.cuda())
+            loss = criterion(output.squeeze(-1), plausibility.cuda())
 
             losses.append(loss.detach().item())
 
-            if output < 0.5:
-                output = 0
-            else:
-                output = 1
-            
-            if output == plausibility.item():
-                if plausibility.item() == 1:
-                    plaus_correct += 1
+            for j in range(len(output)):
+                if output[j].detach().item() < 0.5:
+                    rating = 0
                 else:
-                    implaus_correct += 1
-                total_correct += 1
-            else:
-                incorrect_scenes.append(scene_name)
-                if plausibility.item() == 1:
-                    plaus_incorrect += 1
+                    rating = 1
+
+                if rating == plausibility[j].item():
+                    if plausibility[j].item() == 1:
+                        plaus_correct += 1
+                    else:
+                        implaus_correct += 1
+                    total_correct += 1
                 else:
-                    implaus_incorrect += 1
+                    if plausibility[j].item() == 1:
+                        plaus_incorrect += 1
+                    else:
+                        implaus_incorrect += 1
             
-            if i == 0:
-                grid = torchvision.utils.make_grid(input_images[0, :, :3, :, :])
-                writer.add_image(f'Val Scene {scene_name} {plausibility}-{output}', grid)
+                if i == 0:
+                    grid = torchvision.utils.make_grid(input_images[0, j, :3, :, :])
+                    writer.add_image(f'{epoch} Val Scene {scene_name[j]} {plausibility[j]}-{output[j]}', grid)
 
             writer.add_scalar("Loss/val", loss.item(), (epoch * len(val_set)) + i)
 
-    print("val-accuracy:", total_correct / len(val_set))
+
+    print(f"{plaus_correct + plaus_incorrect}:{implaus_correct + implaus_incorrect}")
+    print("val-accuracy:", total_correct / (batch_size * len(val_set)))
 
     confusion_matrix = [ [plaus_correct / (plaus_correct + plaus_incorrect), plaus_incorrect / (plaus_correct + plaus_incorrect)],
                          [implaus_incorrect / (implaus_correct + implaus_incorrect), implaus_correct / (implaus_correct + implaus_incorrect)]
                        ]
 
-    return total_correct / len(val_set), losses, incorrect_scenes, confusion_matrix
+    return total_correct / (batch_size * len(val_set)), losses, incorrect_scenes, confusion_matrix
 
 
 def train(model, train_set, epoch=0):
@@ -426,60 +442,53 @@ def train(model, train_set, epoch=0):
     implaus_correct = 0
     implaus_incorrect = 0
 
-    # online method for now?
     for i, output in enumerate(tqdm(train_set)):
         optimizer.zero_grad()
-        src, timesteps, input_images, scene_name = output[0], output[1], output[2], output[3]
-        # print(src.shape)
-        # print(timesteps.shape)
-        # print(input_images.shape)
-        # print(scene_name)
-
-        plausibility = Tensor([1]) if "_plaus" in scene_name[0] else Tensor([0])
-
-        output = model(src.cuda(), timesteps, input_images)
-
-        loss = criterion(output.squeeze(0), plausibility.cuda())
+        src, timesteps, input_images, length, plausibility, scene_name = output[0], output[1], output[2], output[3], output[4], output[5]
+        output = model(src, timesteps, input_images, length)
+        
+        loss = criterion(output.squeeze(-1), plausibility.cuda())
         loss.backward()
         
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=2.0)
+        # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=2.0)
         optimizer.step()
         total_loss += loss.detach().item()
 
-        if output < 0.5:
-            rating = 0
-        else:
-            rating = 1
-
-        if rating == plausibility.item():
-            if plausibility.item() == 1:
-                plaus_correct += 1
+        for j in range(len(output)):
+            if output[j].detach().item() < 0.5:
+                rating = 0
             else:
-                implaus_correct += 1
-            total_correct += 1
-        else:
-            if plausibility.item() == 1:
-                plaus_incorrect += 1
-            else:
-                implaus_incorrect += 1
+                rating = 1
 
-        if i % log_interval == 0 and i > 0:
-            lr = optimizer.param_groups[0]['lr']
-            cur_loss = total_loss / log_interval
-            writer.add_scalar("Loss/train", cur_loss,( epoch * len(train_set)) + i)
-            losses.append(cur_loss)
-            # print(f"epoch {epoch:3d} - batch {i:5d}/{len(train_set)} - loss={cur_loss} - lr = {lr}")
-            total_loss = 0
+            if rating == plausibility[j].item():
+                if plausibility[j].item() == 1:
+                    plaus_correct += 1
+                else:
+                    implaus_correct += 1
+                total_correct += 1
+            else:
+                if plausibility[j].item() == 1:
+                    plaus_incorrect += 1
+                else:
+                    implaus_incorrect += 1
+
+        # lr = optimizer.param_groups[0]['lr']
+        writer.add_scalar("Loss/train", loss.item(), (epoch * len(train_set)) + i)
+        losses.append(loss.item())
+        # print(f"epoch {epoch:3d} - batch {i:5d}/{len(train_set)} - loss={loss.item()} - lr = {lr}")
+        total_loss = 0
     
-    print("train-accuracy:", total_correct / len(train_set))
+    print(f"{plaus_correct + plaus_incorrect}:{implaus_correct + implaus_incorrect}")
+    print("train-accuracy:", total_correct / (batch_size * len(train_set)))
 
-    return losses, total_correct / len(train_set)
+    return losses, total_correct / (batch_size * len(train_set))
 
 if __name__ == "__main__":
     # Parameters
-    params = {'batch_size': 1,
+    params = {'batch_size': batch_size,
             'shuffle': True,
-            'num_workers': 4,
+            'num_workers': 8,
+            'pin_memory': True
             }
     max_epochs = 100
 
@@ -498,10 +507,13 @@ if __name__ == "__main__":
     img_enc_dim = 256**2
     model = TransformerModel_XYZRGBD(img_enc_dim + 3, 128, 8, 128, 2, 0.2).cuda()
     
+    # if pretrained_weights:
+    #     model.load_state_dict(torch.load(pretrained_weights))
+    #     print("pretrained weights")
+
     # TODO: try huber loss
     criterion = nn.BCELoss()
 
-    lr = 1e-5  # learning rate
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     # scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=30, gamma=0.1)
 
@@ -532,7 +544,7 @@ if __name__ == "__main__":
             best_confusion = confusion
             best_epoch = epoch
             # save model weights
-            torch.save(best_model, f"./{epoch}_mask_when_hidden_xyz_rgbd_model_all_5.pth")
+            torch.save(best_model, f"./{epoch}_batch_{batch_size}_xyz_rgbd_lr_{lr}.pth")
 
         avg_train_losses.append(np.mean(train_losses))
         avg_val_losses.append(np.mean(val_losses))
@@ -550,7 +562,7 @@ if __name__ == "__main__":
     ax1.set_ylabel('BCE Loss')
     ax1.legend()
 
-    ax2.set_title(f'Accuracy on Validation set ({len(test_generator)} samples)')
+    ax2.set_title(f'Accuracy on Validation set ({len(test_generator)} batches of size {batch_size})')
     ax2.plot(range(len(train_outputs)), train_outputs, label='Training Accuracy')
     ax2.plot(range(len(val_outputs)), val_outputs, label="Validation Accuracy")
     ax2.set_xticks(np.arange(len(val_outputs)))
@@ -570,6 +582,6 @@ if __name__ == "__main__":
 
     plt.show(block=True)
 
-    with open(f"{best_epoch}_mask_when_hidden_xyz_rgbd_model_all_5.txt", "w+") as outfile:
+    with open(f"{best_epoch}_batch_{batch_size}_xyz_rgbd_lr_{lr}.txt", "w+") as outfile:
         for scene_name in best_errors:
             outfile.write(scene_name[0] + "\n")
