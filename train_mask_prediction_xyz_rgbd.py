@@ -37,6 +37,7 @@ torch.multiprocessing.set_sharing_strategy('file_system')
 writer = SummaryWriter(f"/home/zshureih/MCS/opics/output/logs/batch_{batch_size}_xyz_delta_rgbd_sequence_mask_model_lr_{lr}")
 
 dataset_dir = "/media/zshureih/Hybrid Drive/eval_5_dataset"
+# dataset_dir = "/media/zshureih/Hybrid Drive/eval5_bug_set"
 validation_dir = "/media/zshureih/Hybrid Drive/eval5_dataset_6"
 
 # dataset_dir = os.path.join("C:", "\\Users", "Zeyad", "AI-535-Final-Project", "eval5_dataset_1")
@@ -116,7 +117,7 @@ def get_dataset(eval=False):
     
     print(master_dir)
 
-    scenes = listdir(master_dir)
+    scenes = [f for f in listdir(master_dir) if "_plaus" in f]
     shuffle(scenes)
     scenes = np.array(scenes)
 
@@ -140,7 +141,7 @@ def get_dataset(eval=False):
                 else:
                     non_actors.append(id)
             
-            if len(non_actors) != 1 or len(actors) == 0 or "implaus" in scene_name:
+            if len(non_actors) != 1 or len(actors) == 0:
                 scenes = scenes[scenes != scene_name]
                 continue
 
@@ -179,7 +180,13 @@ def get_dataset(eval=False):
             track = scene_df[SEQUENCE_FEATURES].iloc[track_idx].to_numpy().astype(np.float64)
 
             # get the packed sequence of positions
-            track = torch.tensor(track).unsqueeze(0)    
+            track = torch.tensor(track).unsqueeze(0)
+
+            # skip scenes without occlusion events, unless we're in gravity
+            if len(find_gaps(track[:, :, -1].squeeze())) == 0 and "grav" not in scene_name:
+                print(scene_name, "quitting")
+                continue
+
             # add the new true trajectory to the dataset
             track_length.append(torch.max(track[:, :, -1]))
             
@@ -217,6 +224,8 @@ def get_deltas(source):
     comp_x = torch.cat((unmasked[:, 0, :].unsqueeze(1), unmasked[:, :-1, :]), axis=1)
     deltas = torch.sub(unmasked, comp_x)
 
+    deltas = get_norm_from_deltas(deltas)
+
     # replace the non MASK tokens from the unpadded sequence with the unmasked deltas
     unpadded[:, torch.unique(unmasked_idx[1]), :] = deltas
     # replace the non PAD tokens from the source sequence with the delta-ized unpadded sequence
@@ -230,7 +239,7 @@ def get_self_normalized(source):
 def get_norm_from_deltas(src):
     # first position is always (0,0,0)
     # after that, values are added
-    return torch.cumsum(src, axis=0)
+    return torch.cumsum(src, axis=1)
 
 class MCS_Sequence_Dataset(Dataset):
     def __init__(self, eval=False) -> None:
@@ -384,7 +393,6 @@ class MCS_Sequence_Dataset(Dataset):
             track = track[:, :3]
             # track = get_deltas(track.unsqueeze(0))
             track, masked_idx = self.mask_input(track.unsqueeze(0), time, scene_name)
-            
             src[i, :track.shape[1], :] = track
 
         rgb_images = [img.unsqueeze(0) for img in rgb_images[0]]
@@ -437,7 +445,7 @@ class MCS_Sequence_Dataset(Dataset):
         target = torch.full((self.max_length, 3), PAD)
         target[:truth.size(1), :] = truth.squeeze()
         target = get_deltas(target.unsqueeze(0)).squeeze(0)
-
+        
         time = torch.full((self.max_length, 1), PAD)
         time[:timesteps.size(0)] = timesteps.unsqueeze(1)
 
@@ -469,6 +477,9 @@ def eval(model, val_set, export_flag=False):
                 idx = torch.where(src[j] == MASK)
                 idx = torch.unique(idx[0])
 
+                if len(idx) == 0:
+                    continue
+
                 loss += criterion(output[j, idx].permute(1, 0, 2), target[j, idx].unsqueeze(0).cuda())
 
             losses.append(loss.mean().detach().item())
@@ -496,6 +507,8 @@ def train(model, train_set, epoch=0):
             # get masked idx of output        
             idx = torch.where(src[j] == MASK)
             idx = torch.unique(idx[0])
+            if len(idx) == 0:
+                continue
 
             loss += criterion(output[j, idx].permute(1, 0, 2), target[j, idx].unsqueeze(0).cuda())
 
@@ -607,19 +620,26 @@ if __name__ == "__main__":
             unmasked_src = unpadded_src[unmasked_idx].unsqueeze(1)
             
             # target
-            unpadded_target = get_norm_from_deltas(unpadded_target)
+            # unpadded_target = get_norm_from_deltas(unpadded_target)
+            print("unpadded_target.shape")
+            print(unpadded_target)
             x = unpadded_target[:, :, 0].reshape(-1).cpu().numpy()
             z = unpadded_target[:, :, 1].reshape(-1).cpu().numpy()
             y = unpadded_target[:, :, 2].reshape(-1).cpu().numpy()
             ax.scatter(x,y,z,c='green', label="target trajectory")
 
-            unmasked_src = get_norm_from_deltas(unmasked_src)
+            # unmasked_src = get_norm_from_deltas(unmasked_src)
+            print("unmasked_src.shape")
+            print(unmasked_src)
             x = unmasked_src[:, :, 0].reshape(-1).cpu().numpy()
             z = unmasked_src[:, :, 1].reshape(-1).cpu().numpy()
             y = unmasked_src[:, :, 2].reshape(-1).cpu().numpy()
             ax.scatter(x,y,z,c='blue',label="source trajectory")
 
-            unpadded_output = get_norm_from_deltas(unpadded_output)
+            # unpadded_output = get_norm_from_deltas(unpadded_output)
+            print("unpadded_output.shape")
+            print(unpadded_output.shape)
+            print(unpadded_output)
             x = unpadded_output[:, :, 0].reshape(-1).cpu().numpy()
             z = unpadded_output[:, :, 1].reshape(-1).cpu().numpy()
             y = unpadded_output[:, :, 2].reshape(-1).cpu().numpy()

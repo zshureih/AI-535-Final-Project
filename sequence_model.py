@@ -51,17 +51,17 @@ class TransformerModel_XYZRGBD(nn.Module):
 
     def init_cnn_weights(self, m) -> None:
         if isinstance(m, nn.Conv2d):
-            initrange = 1.0
+            initrange = 0.1
             m.weight.data.uniform_(-initrange, initrange)
     
     def init_linear_weights(self, m) -> None:
         if isinstance(m, nn.Linear):
-            initrange = 1.0
+            initrange = 0.1
             m.bias.data.zero_()
             m.weight.data.uniform_(-initrange, initrange)
 
     def init_weights(self) -> None:
-        initrange = 1.0
+        initrange = 0.1
 
         self.xyz_encoder.bias.data.zero_()
         self.xyz_encoder.weight.data.uniform_(-initrange, initrange)
