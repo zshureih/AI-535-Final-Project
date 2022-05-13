@@ -5,6 +5,9 @@ import torch.nn.functional as F
 from torch.nn import TransformerEncoder, TransformerEncoderLayer, TransformerDecoder, TransformerDecoderLayer
 from torch.utils.data import dataset
 
+MASK = 99.
+PAD = -99.
+
 class TransformerModel_XYZRGBD(nn.Module):
 
     def __init__(self, input_dim: int, d_model: int, nhead: int, d_hid: int,
@@ -33,26 +36,39 @@ class TransformerModel_XYZRGBD(nn.Module):
         self.d_model = d_model
 
         # classification decoder
-        self.decoder = nn.Linear(self.d_model, 3)
+        self.decoder = nn.Sequential(
+            nn.Linear(self.d_model, 128),
+            nn.ReLU(),
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.Linear(64, 8),
+            nn.ReLU(),
+            nn.Linear(8, 3)
+        )
         self.relu = nn.ReLU()
 
         self.init_weights()
 
     def init_cnn_weights(self, m) -> None:
         if isinstance(m, nn.Conv2d):
-            initrange = 0.1
+            initrange = 1.0
+            m.weight.data.uniform_(-initrange, initrange)
+    
+    def init_linear_weights(self, m) -> None:
+        if isinstance(m, nn.Linear):
+            initrange = 1.0
+            m.bias.data.zero_()
             m.weight.data.uniform_(-initrange, initrange)
 
     def init_weights(self) -> None:
-        initrange = 0.1
+        initrange = 1.0
 
         self.xyz_encoder.bias.data.zero_()
         self.xyz_encoder.weight.data.uniform_(-initrange, initrange)
 
-        self.decoder.bias.data.zero_()
-        self.decoder.weight.data.uniform_(-initrange, initrange)
-
         self.img_encoder.apply(self.init_cnn_weights)
+
+        self.decoder.apply(self.init_linear_weights)
 
 
     def forward(self, src: Tensor, timesteps: Tensor, input_images: Tensor, lengths: Tensor) -> Tensor:
@@ -89,7 +105,7 @@ class TransformerModel_XYZRGBD(nn.Module):
 
             # concat image encodings and xyz values, |S| x 1 x input_dim
             x = torch.cat([inputs.unsqueeze(0), x], axis=-1).permute(1, 0, 2)
-            
+
             # linear + positional encoding, |S| x 1 x d_model
             x = self.relu(self.xyz_encoder(x))
             x = self.pos_encoder(x)
