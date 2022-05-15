@@ -28,13 +28,13 @@ SEQUENCE_FEATURES = ["3d_pos_x","3d_pos_y","3d_pos_z", "2d_bbox_x", "2d_bbox_y",
 IMG_FEATURES = []
 SEQUENCE_DIM = len(SEQUENCE_FEATURES)
 batch_size = 12
-lr = 1e-3
+lr = 1e-4
 
 MASK = 99.
 PAD = -99.
 
 torch.multiprocessing.set_sharing_strategy('file_system')
-writer = SummaryWriter(f"/home/zshureih/MCS/opics/output/logs/batch_{batch_size}_xyz_delta_rgbd_sequence_mask_model_lr_{lr}")
+writer = SummaryWriter(f"/home/zshureih/MCS/opics/output/logs/batch_{batch_size}_xyz_delta_rgbd_sequence_model_lr_{lr}")
 
 dataset_dir = "/media/zshureih/Hybrid Drive/eval_5_dataset"
 # dataset_dir = "/media/zshureih/Hybrid Drive/eval5_bug_set"
@@ -192,6 +192,9 @@ def get_dataset(eval=False):
             
             # save the seqeunce without any padding
             tracks.append(track)
+
+        if len(tracks) == 0:
+            continue
 
         master_X.append(tracks)
         track_lengths.append(track_length)
@@ -403,7 +406,12 @@ class MCS_Sequence_Dataset(Dataset):
 
         return src, time, rgb_images, depth_images, masked_idx
 
-    def get_masked_data(self, src, timesteps, scene_name, root=dataset_dir):
+    def get_masked_data(self, src, timesteps, scene_name, eval=False):
+        if eval:
+            root = validation_dir
+        else:
+            root = dataset_dir
+
         root_folder = os.path.join(root, scene_name)
 
         target = src.detach().clone()
@@ -430,7 +438,7 @@ class MCS_Sequence_Dataset(Dataset):
 
         src, timesteps, rgb, depth, masked_ = self.cook_tracks(scene, track_lengths, scene_name[0], drop_step, self.eval)
 
-        truth = self.get_masked_data(src, timesteps, scene_name[0])
+        truth = self.get_masked_data(src, timesteps, scene_name[0], self.eval)
         
         input_image = torch.cat([rgb, depth], axis=1)
 
@@ -469,12 +477,12 @@ def eval(model, val_set, export_flag=False):
             # print(src[masked_idx[length[:, 1].long()].long()].shape)
             output = model(src, timesteps, input_images, length)
 
-            outputs.append([src.detach().squeeze(), output.detach().squeeze(), target.detach().squeeze(), scene_name, timesteps])
+            # outputs.append([src.detach().squeeze(), output.detach().squeeze(), target.detach().squeeze(), scene_name, timesteps])
             
             loss = 0
             for j in range(length.size(0)):
                 # get masked idx of output        
-                idx = torch.where(src[j] == MASK)
+                idx = torch.where(src[j] != PAD)
                 idx = torch.unique(idx[0])
 
                 if len(idx) == 0:
@@ -488,7 +496,7 @@ def eval(model, val_set, export_flag=False):
 
     print(f"epoch {epoch:3d} - avg val loss={np.mean(losses)} - lr = {lr}")
 
-    return losses, outputs
+    return losses
 
 
 def train(model, train_set, epoch=0):
@@ -505,7 +513,7 @@ def train(model, train_set, epoch=0):
         loss = 0
         for j in range(length.size(0)):
             # get masked idx of output        
-            idx = torch.where(src[j] == MASK)
+            idx = torch.where(src[j] != PAD)
             idx = torch.unique(idx[0])
             if len(idx) == 0:
                 continue
@@ -573,7 +581,7 @@ if __name__ == "__main__":
         print("epoch:", epoch)
 
         train_losses = train(model, train_generator, epoch)
-        val_losses, v_o = eval(model, test_generator, epoch)
+        val_losses = eval(model, test_generator, epoch)
         # scheduler.step()
 
         if np.mean(val_losses, axis=-1) < best_val_loss:
@@ -582,10 +590,10 @@ if __name__ == "__main__":
             best_epoch = epoch
             # save model weights
             torch.save(best_model, f"./{epoch}_batch_{batch_size}_xyz_delta_rgbd_lr_{lr}_sequence_mask_model.pth")
+            # val_outputs.append(v_o)
 
         avg_train_losses.append(np.mean(train_losses))
         avg_val_losses.append(np.mean(val_losses))
-        val_outputs.append(v_o)
 
 
     fig = plt.figure(figsize=(12, 4))
@@ -598,60 +606,60 @@ if __name__ == "__main__":
     ax.set_ylabel('MSE Loss')
     ax.legend()
 
-    ax = fig.add_subplot(122, projection='3d')
-    val_outputs.reverse()
-    for info in val_outputs:
-        src, output, target, name, time = info[0][0], info[0][1], info[0][2], info[0][3], info[0][4]
-        for j in range(src.size(0)):
-            ax.set_title(name[j])
-            # print("name", name)
-            # print("length", length)
-            # print(output)
+    # ax = fig.add_subplot(122, projection='3d')
+    # val_outputs.reverse()
+    # for info in val_outputs:
+    #     src, output, target, name, time = info[0][0], info[0][1], info[0][2], info[0][3], info[0][4]
+    #     for j in range(src.size(0)):
+    #         ax.set_title(name[j])
+    #         # print("name", name)
+    #         # print("length", length)
+    #         # print(output)
 
 
-            unpad_idx = torch.where(src[j] != PAD)
-            unpad_idx = torch.unique(unpad_idx[0])
-            unpadded_src = src[j, unpad_idx]
-            unpadded_output = output[j, unpad_idx].unsqueeze(1)
-            unpadded_target = target[j, unpad_idx].unsqueeze(1)
+    #         unpad_idx = torch.where(src[j] != PAD)
+    #         unpad_idx = torch.unique(unpad_idx[0])
+    #         unpadded_src = src[j, unpad_idx]
+    #         unpadded_output = output[j, unpad_idx].unsqueeze(1)
+    #         unpadded_target = target[j, unpad_idx].unsqueeze(1)
             
-            unmasked_idx = torch.where(unpadded_src != MASK)
-            unmasked_idx = torch.unique(unmasked_idx[0])
-            unmasked_src = unpadded_src[unmasked_idx].unsqueeze(1)
+    #         unmasked_idx = torch.where(unpadded_src != MASK)
+    #         unmasked_idx = torch.unique(unmasked_idx[0])
+    #         unmasked_src = unpadded_src[unmasked_idx].unsqueeze(1)
             
-            # target
-            # unpadded_target = get_norm_from_deltas(unpadded_target)
-            print("unpadded_target.shape")
-            print(unpadded_target)
-            x = unpadded_target[:, :, 0].reshape(-1).cpu().numpy()
-            z = unpadded_target[:, :, 1].reshape(-1).cpu().numpy()
-            y = unpadded_target[:, :, 2].reshape(-1).cpu().numpy()
-            ax.scatter(x,y,z,c='green', label="target trajectory")
+    #         # target
+    #         # unpadded_target = get_norm_from_deltas(unpadded_target)
+    #         print("unpadded_target.shape")
+    #         print(unpadded_target)
+    #         x = unpadded_target[:, :, 0].reshape(-1).cpu().numpy()
+    #         z = unpadded_target[:, :, 1].reshape(-1).cpu().numpy()
+    #         y = unpadded_target[:, :, 2].reshape(-1).cpu().numpy()
+    #         ax.scatter(x,y,z,c='green', label="target trajectory")
 
-            # unmasked_src = get_norm_from_deltas(unmasked_src)
-            print("unmasked_src.shape")
-            print(unmasked_src)
-            x = unmasked_src[:, :, 0].reshape(-1).cpu().numpy()
-            z = unmasked_src[:, :, 1].reshape(-1).cpu().numpy()
-            y = unmasked_src[:, :, 2].reshape(-1).cpu().numpy()
-            ax.scatter(x,y,z,c='blue',label="source trajectory")
+    #         # unmasked_src = get_norm_from_deltas(unmasked_src)
+    #         print("unmasked_src.shape")
+    #         print(unmasked_src)
+    #         x = unmasked_src[:, :, 0].reshape(-1).cpu().numpy()
+    #         z = unmasked_src[:, :, 1].reshape(-1).cpu().numpy()
+    #         y = unmasked_src[:, :, 2].reshape(-1).cpu().numpy()
+    #         ax.scatter(x,y,z,c='blue',label="source trajectory")
 
-            # unpadded_output = get_norm_from_deltas(unpadded_output)
-            print("unpadded_output.shape")
-            print(unpadded_output.shape)
-            print(unpadded_output)
-            x = unpadded_output[:, :, 0].reshape(-1).cpu().numpy()
-            z = unpadded_output[:, :, 1].reshape(-1).cpu().numpy()
-            y = unpadded_output[:, :, 2].reshape(-1).cpu().numpy()
-            ax.scatter(x,y,z,c='red',label="output trajectory")
+    #         # unpadded_output = get_norm_from_deltas(unpadded_output)
+    #         print("unpadded_output.shape")
+    #         print(unpadded_output.shape)
+    #         print(unpadded_output)
+    #         x = unpadded_output[:, :, 0].reshape(-1).cpu().numpy()
+    #         z = unpadded_output[:, :, 1].reshape(-1).cpu().numpy()
+    #         y = unpadded_output[:, :, 2].reshape(-1).cpu().numpy()
+    #         ax.scatter(x,y,z,c='red',label="output trajectory")
 
-            break
+    #         break
         
-        break
+    #     break
 
-    ax.set_xlabel('X')
-    ax.set_ylabel('Z')
-    ax.set_zlabel('Y')
-    ax.legend()
+    # ax.set_xlabel('X')
+    # ax.set_ylabel('Z')
+    # ax.set_zlabel('Y')
+    # ax.legend()
 
     plt.show(block=True)
