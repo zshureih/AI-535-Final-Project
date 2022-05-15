@@ -4,9 +4,55 @@ from torch import nn, Tensor
 import torch.nn.functional as F
 from torch.nn import TransformerEncoder, TransformerEncoderLayer, TransformerDecoder, TransformerDecoderLayer
 from torch.utils.data import dataset
+import torchvision.models as models
+import matplotlib.pyplot as plt
+import numpy as np
 
 MASK = 99.
 PAD = -99.
+
+class Block(nn.Module):
+    def __init__(self, in_channels: int, out_channels: int, stride=1) -> None:
+        super().__init__()
+
+        self.skip = nn.Sequential()
+        if stride != 1 or in_channels != out_channels:
+            self.skip = nn.Sequential(
+                nn.Conv2d(in_channels=in_channels, out_channels=out_channels, kernel_size=1, stride=stride, bias=False),
+                nn.BatchNorm2d(out_channels)
+            )
+            self.skip.apply(self.init_cnn_weights)
+        else:
+          self.skip = None
+
+        self.block = nn.Sequential(
+            nn.Conv2d(in_channels=in_channels, out_channels=in_channels, kernel_size=3, padding=1, stride=1, bias=False),
+            nn.BatchNorm2d(in_channels),
+            nn.ReLU(),
+            nn.Conv2d(in_channels=in_channels, out_channels=out_channels, kernel_size=3, padding=1, stride=1, bias=False),
+            nn.BatchNorm2d(out_channels))
+
+        self.block.apply(self.init_cnn_weights)
+
+        self.relu = nn.ReLU()
+
+    def init_cnn_weights(self, m) -> None:
+        if isinstance(m, nn.Conv2d):
+            n = m.in_channels
+            y = 1.0/np.sqrt(n)
+            m.weight.data.uniform_(-y, y)
+        
+    def forward(self, x):
+        identity = x
+        out = self.block(x)
+
+        if self.skip is not None:
+            identity = self.skip(x)
+
+        out += identity
+        out = self.relu(out)
+
+        return out
 
 class TransformerModel_XYZRGBD(nn.Module):
 
@@ -20,14 +66,16 @@ class TransformerModel_XYZRGBD(nn.Module):
         
         self.xyz_encoder = nn.Linear(input_dim, d_model)
         
-        # in_channels - R,G,B,D,OCCL_MASK,OBJ_MASK, out_channels - 1, 
-        self.img_encoder = nn.Sequential(
-              nn.Conv2d(4, 8, (3,3), 1, padding=(1,1)),
-              nn.ReLU(),
-              nn.Conv2d(8, 64, (3,3), 1),
-              nn.ReLU(),
-              nn.MaxPool2d((3,3)),
-        )
+        # use pretrained resnet18
+        self.img_encoder = models.resnet18(pretrained=True)
+
+        # freeze everything except for the input
+        for param in self.img_encoder.parameters():
+            param.requires_grad = False
+        self.img_encoder.conv1 = nn.Conv2d(4, 64, kernel_size=(7, 7), stride=(2,2), padding=(3,3), bias=False).requires_grad_(True)
+
+        # remove the fully connected layer at the end
+        self.img_encoder = torch.nn.Sequential(*(list(self.img_encoder.children())[:-1]))
 
         self.pos_encoder = PositionalEncoding(d_model, dropout)
         encoder_layers = TransformerEncoderLayer(d_model, nhead, d_hid, dropout)
@@ -66,8 +114,6 @@ class TransformerModel_XYZRGBD(nn.Module):
         self.xyz_encoder.bias.data.zero_()
         self.xyz_encoder.weight.data.uniform_(-initrange, initrange)
 
-        self.img_encoder.apply(self.init_cnn_weights)
-
         self.decoder.apply(self.init_linear_weights)
 
 
@@ -94,8 +140,15 @@ class TransformerModel_XYZRGBD(nn.Module):
 
             # make x the right shape by trimming the extra padding beyond scene length
             time = timesteps[i, :lengths[i, 1].long()]
-            x = src[i, :].unsqueeze(0).cuda()
+            x = src[i, time.long().squeeze() - 1].unsqueeze(0).cuda()
+            print(x.shape)
+            print(time)
+            print(x)
             images = input_images[i, :lengths[i, 1].long()]
+            print(images.shape)
+            for img in images:
+                print(torch.unique(img))
+            quit()
 
             # start processing our images
             inputs = torch.full((x.size(1), self.input_dim - 3), 0.).cuda()
@@ -118,8 +171,6 @@ class TransformerModel_XYZRGBD(nn.Module):
             output = self.decoder(output)
 
             results.append(output)
-
-        results = torch.stack(results, dim=0)
 
         return results
 

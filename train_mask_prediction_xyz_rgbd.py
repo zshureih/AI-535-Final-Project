@@ -34,7 +34,7 @@ MASK = 99.
 PAD = -99.
 
 torch.multiprocessing.set_sharing_strategy('file_system')
-writer = SummaryWriter(f"/home/zshureih/MCS/opics/output/logs/batch_{batch_size}_xyz_delta_rgbd_sequence_model_lr_{lr}")
+writer = SummaryWriter(f"/home/zshureih/MCS/opics/output/logs/batch_{batch_size}_xyz_delta_pretrained_resnet_sequence_mask_model_lr_{lr}")
 
 dataset_dir = "/media/zshureih/Hybrid Drive/eval_5_dataset"
 # dataset_dir = "/media/zshureih/Hybrid Drive/eval5_bug_set"
@@ -119,7 +119,7 @@ def get_dataset(eval=False):
 
     scenes = [f for f in listdir(master_dir) if "_plaus" in f]
     shuffle(scenes)
-    scenes = np.array(scenes)
+    scenes = np.array(scenes)[:100]
 
     # go through each scene
     for scene_name in np.unique(scenes):
@@ -141,7 +141,7 @@ def get_dataset(eval=False):
                 else:
                     non_actors.append(id)
             
-            if len(non_actors) != 1 or len(actors) == 0:
+            if len(non_actors) != 1:
                 scenes = scenes[scenes != scene_name]
                 continue
 
@@ -182,10 +182,10 @@ def get_dataset(eval=False):
             # get the packed sequence of positions
             track = torch.tensor(track).unsqueeze(0)
 
-            # skip scenes without occlusion events, unless we're in gravity
-            if len(find_gaps(track[:, :, -1].squeeze())) == 0 and "grav" not in scene_name:
-                print(scene_name, "quitting")
-                continue
+            # # skip scenes without occlusion events, unless we're in gravity
+            # if len(find_gaps(track[:, :, -1].squeeze())) == 0 and "grav" not in scene_name:
+            #     print(scene_name, "quitting")
+            #     continue
 
             # add the new true trajectory to the dataset
             track_length.append(torch.max(track[:, :, -1]))
@@ -553,7 +553,7 @@ if __name__ == "__main__":
 
     # okay let's start training
     # img_enc_dim = 128
-    img_enc_dim = 256**2
+    img_enc_dim = 512
     model = TransformerModel_XYZRGBD(img_enc_dim + 3, 128, 8, 128, 2, 0.2).cuda()
     
     # if pretrained_weights:
@@ -589,7 +589,7 @@ if __name__ == "__main__":
             best_model = model.state_dict()
             best_epoch = epoch
             # save model weights
-            torch.save(best_model, f"./{epoch}_batch_{batch_size}_xyz_delta_rgbd_lr_{lr}_sequence_mask_model.pth")
+            torch.save(best_model, f"./{epoch}_batch_{batch_size}_xyz_delta_pretrained_resnet_lr_{lr}_sequence_model.pth")
             # val_outputs.append(v_o)
 
         avg_train_losses.append(np.mean(train_losses))

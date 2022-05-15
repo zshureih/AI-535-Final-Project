@@ -115,9 +115,9 @@ if __name__ == "__main__":
     # okay let's start evaluating
     lr = 1e-3  # learning rate
 
-    img_enc_dim = 256**2
+    img_enc_dim = 512
     model = TransformerModel_XYZRGBD(img_enc_dim + 3, 128, 8, 128, 2, 0.2).cuda()
-    model.load_state_dict(torch.load("4_batch_12_xyz_delta_rgbd_lr_0.001_sequence_mask_model.pth"))
+    model.load_state_dict(torch.load("12_batch_12_xyz_delta_pretrained_resnet_lr_0.0001_sequence_model.pth"))
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     criterion = nn.MSELoss()
 
@@ -148,8 +148,6 @@ if __name__ == "__main__":
 
                     loss += l
                 
-                losses.append(loss.mean().detach().item())
-
         return losses
 
     losses = eval(model, full_generator)
