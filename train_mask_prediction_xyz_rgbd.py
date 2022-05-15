@@ -27,7 +27,7 @@ from sequence_model import TransformerModel_XYZRGBD, generate_square_subsequent_
 SEQUENCE_FEATURES = ["3d_pos_x","3d_pos_y","3d_pos_z", "2d_bbox_x", "2d_bbox_y", "2d_bbox_w", "2d_bbox_h", "timestep"]
 IMG_FEATURES = []
 SEQUENCE_DIM = len(SEQUENCE_FEATURES)
-batch_size = 12
+batch_size = 2
 lr = 1e-4
 
 MASK = 99.
@@ -36,13 +36,13 @@ PAD = -99.
 torch.multiprocessing.set_sharing_strategy('file_system')
 writer = SummaryWriter(f"/home/zshureih/MCS/opics/output/logs/batch_{batch_size}_xyz_delta_pretrained_resnet_sequence_mask_model_lr_{lr}")
 
-dataset_dir = "/media/zshureih/Hybrid Drive/eval_5_dataset"
+# dataset_dir = "/media/zshureih/Hybrid Drive/eval_5_dataset_1"
 # dataset_dir = "/media/zshureih/Hybrid Drive/eval5_bug_set"
-validation_dir = "/media/zshureih/Hybrid Drive/eval5_dataset_6"
+# validation_dir = "/media/zshureih/Hybrid Drive/eval5_dataset_6"
 
-# dataset_dir = os.path.join("C:", "\\Users", "Zeyad", "AI-535-Final-Project", "eval5_dataset_1")
+dataset_dir = os.path.join("C:", "\\Users", "Zeyad", "AI-535-Final-Project", "eval5_dataset_1")
 # dataset_dir = "/nfs/hpc/share/shureihz/opics_data/eval5_dataset_1"
-# validation_dir = os.path.join("C:", "\\Users", "Zeyad", "AI-535-Final-Project", "eval5_dataset_1")
+validation_dir = os.path.join("C:", "\\Users", "Zeyad", "AI-535-Final-Project", "eval5_dataset_1")
 
 # pretrained_weights = "/home/zshureih/MCS/opics/output/ckpts/13_mask_when_hidden_xyz_plus_rgbd_model_all_5.pth"
 
@@ -119,7 +119,7 @@ def get_dataset(eval=False):
 
     scenes = [f for f in listdir(master_dir) if "_plaus" in f]
     shuffle(scenes)
-    scenes = np.array(scenes)[:100]
+    scenes = np.array(scenes)
 
     # go through each scene
     for scene_name in np.unique(scenes):
@@ -376,10 +376,10 @@ class MCS_Sequence_Dataset(Dataset):
             
             # get the timesteps in which the object is visible
             time = track[:, -1]
-            if "grav_" in scene_name:
-                indx = torch.where(time <= drop_Step)
-                indx = torch.cat((indx[0], torch.full((1,), time.size(0) - 1).long()))
-                time = time[indx]
+            # if "grav_" in scene_name:
+            #     indx = torch.where(time <= drop_Step)
+            #     indx = torch.cat((indx[0], torch.full((1,), time.size(0) - 1).long()))
+            #     time = time[indx]
 
             # get the bboxes of the object in which the object is visible
             bboxes = track[:, 3:-1]
@@ -481,14 +481,11 @@ def eval(model, val_set, export_flag=False):
             
             loss = 0
             for j in range(length.size(0)):
-                # get masked idx of output        
+                # get masked idx of output
                 idx = torch.where(src[j] != PAD)
                 idx = torch.unique(idx[0])
 
-                if len(idx) == 0:
-                    continue
-
-                loss += criterion(output[j, idx].permute(1, 0, 2), target[j, idx].unsqueeze(0).cuda())
+                loss += criterion(output[j].permute(1, 0, 2), target[j, idx].unsqueeze(0).cuda())
 
             losses.append(loss.mean().detach().item())
 
@@ -512,13 +509,11 @@ def train(model, train_set, epoch=0):
         # calc loss
         loss = 0
         for j in range(length.size(0)):
-            # get masked idx of output        
+            # get masked idx of output
             idx = torch.where(src[j] != PAD)
             idx = torch.unique(idx[0])
-            if len(idx) == 0:
-                continue
 
-            loss += criterion(output[j, idx].permute(1, 0, 2), target[j, idx].unsqueeze(0).cuda())
+            loss += criterion(output[j].permute(1, 0, 2), target[j, idx].unsqueeze(0).cuda())
 
         loss.mean().backward()
         

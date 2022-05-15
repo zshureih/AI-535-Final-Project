@@ -1,3 +1,4 @@
+from email.mime import image
 import math
 import torch
 from torch import nn, Tensor
@@ -139,25 +140,24 @@ class TransformerModel_XYZRGBD(nn.Module):
         for i in range(src.size(0)):
 
             # make x the right shape by trimming the extra padding beyond scene length
-            time = timesteps[i, :lengths[i, 1].long()]
-            x = src[i, time.long().squeeze() - 1].unsqueeze(0).cuda()
-            print(x.shape)
-            print(time)
-            print(x)
+            x = src[i, :].unsqueeze(0).cuda()
+            unpadded_idx = torch.where(x != PAD)
+            unpadded_idx = torch.unique(unpadded_idx[1])
+            unpadded_x = x[:, unpadded_idx, :]
+            
+            unmmask_idx = torch.where(unpadded_x != MASK)
+            unmmask_idx = torch.unique(unmmask_idx[1])
+
             images = input_images[i, :lengths[i, 1].long()]
-            print(images.shape)
-            for img in images:
-                print(torch.unique(img))
-            quit()
 
             # start processing our images
-            inputs = torch.full((x.size(1), self.input_dim - 3), 0.).cuda()
+            inputs = torch.full((unpadded_x.size(1), self.input_dim - 3), MASK).cuda()
             img_enc = self.img_encoder(images.cuda())
             flattened_enc = torch.reshape(img_enc, (img_enc.shape[0], self.input_dim - 3))
-            inputs[time.long().squeeze() - 1, :] = flattened_enc
+            inputs[unmmask_idx, :] = flattened_enc
 
             # concat image encodings and xyz values, |S| x 1 x input_dim
-            x = torch.cat([inputs.unsqueeze(0), x], axis=-1).permute(1, 0, 2)
+            x = torch.cat([inputs.unsqueeze(0), unpadded_x], axis=-1).permute(1, 0, 2)
 
             # linear + positional encoding, |S| x 1 x d_model
             x = self.relu(self.xyz_encoder(x))
