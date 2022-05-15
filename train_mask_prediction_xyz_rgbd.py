@@ -1,5 +1,6 @@
 import re
 import sched
+from numpy import source
 import pandas as pd
 import numpy as np
 from random import shuffle
@@ -26,18 +27,22 @@ from sequence_model import TransformerModel_XYZRGBD, generate_square_subsequent_
 SEQUENCE_FEATURES = ["3d_pos_x","3d_pos_y","3d_pos_z", "2d_bbox_x", "2d_bbox_y", "2d_bbox_w", "2d_bbox_h", "timestep"]
 IMG_FEATURES = []
 SEQUENCE_DIM = len(SEQUENCE_FEATURES)
-batch_size = 4
-lr = 1e-3
+batch_size = 12
+lr = 1e-4
 
 MASK = 99.
 PAD = -99.
 
 torch.multiprocessing.set_sharing_strategy('file_system')
-writer = SummaryWriter(f"/home/zshureih/MCS/opics/output/logs/batch_{batch_size}_xyz_rgbd_sequence_mask_model_lr_{lr}")
+writer = SummaryWriter(f"/home/zshureih/MCS/opics/output/logs/batch_{batch_size}_xyz_delta_pretrained_resnet_sequence_mask_model_lr_{lr}")
 
-dataset_dir = os.path.join("C:", "\\Users", "Zeyad", "AI-535-Final-Project", "eval5_dataset_1")
+dataset_dir = "/media/zshureih/Hybrid Drive/eval_5_dataset"
+# dataset_dir = "/media/zshureih/Hybrid Drive/eval5_bug_set"
+validation_dir = "/media/zshureih/Hybrid Drive/eval5_dataset_6"
+
+# dataset_dir = os.path.join("C:", "\\Users", "Zeyad", "AI-535-Final-Project", "eval5_dataset_1")
 # dataset_dir = "/nfs/hpc/share/shureihz/opics_data/eval5_dataset_1"
-validation_dir = os.path.join("C:", "\\Users", "Zeyad", "AI-535-Final-Project", "eval5_dataset_1")
+# validation_dir = os.path.join("C:", "\\Users", "Zeyad", "AI-535-Final-Project", "eval5_dataset_1")
 
 # pretrained_weights = "/home/zshureih/MCS/opics/output/ckpts/13_mask_when_hidden_xyz_plus_rgbd_model_all_5.pth"
 
@@ -85,6 +90,24 @@ features = [
         "revised_2d_bbox_h"
     ]
 
+def get_drop_step(scene_name, root=dataset_dir):
+    root_folder = os.path.join(root, scene_name)
+    
+    pole_height = np.inf
+
+    meta_files = os.listdir(os.path.join(root_folder, "Step_Output"))
+    for k in range(1, len(meta_files) + 1):
+        step_meta_path = os.path.join(root_folder, "Step_Output", f"step_{k:06n}.json")
+        step_meta = json.load(open(step_meta_path))
+
+        keys_list = list(step_meta['structural_object_list'].keys())
+        for key in keys_list:
+            if "pole_" in key:
+                if step_meta['structural_object_list'][key]["position"]["y"] < pole_height:
+                    pole_height = step_meta['structural_object_list'][key]["position"]["y"]
+                else:
+                    return k
+
 def get_dataset(eval=False):
     master_df = pd.DataFrame([], columns=features + ['scene_name'])
     
@@ -94,9 +117,9 @@ def get_dataset(eval=False):
     
     print(master_dir)
 
-    scenes = listdir(master_dir)
+    scenes = [f for f in listdir(master_dir) if "_plaus" in f]
     shuffle(scenes)
-    scenes = np.array(scenes)
+    scenes = np.array(scenes)[:100]
 
     # go through each scene
     for scene_name in np.unique(scenes):
@@ -107,6 +130,7 @@ def get_dataset(eval=False):
             # get the unique object ids
             unique_objects = np.unique(df['obj_id'].to_numpy())
             df['scene_name'] = [scene_name for i in range(df.shape[0])]
+            df['drop_step'] = [-1 if "grav_" not in scene_name else get_drop_step(scene_name, master_dir) for i in range(df.shape[0])]
             actors = []
             non_actors = []
             # filter out betweeen actors and non-actors
@@ -117,7 +141,7 @@ def get_dataset(eval=False):
                 else:
                     non_actors.append(id)
             
-            if len(non_actors) != 1 or "grav_" in scene_name or "implaus" in scene_name:
+            if len(non_actors) != 1:
                 scenes = scenes[scenes != scene_name]
                 continue
 
@@ -134,6 +158,7 @@ def get_dataset(eval=False):
     master_X = []
     track_lengths = []
     scene_dict = {}
+    drop_step_dict = {}
     shuffle(scenes)
     # for each scene name (shuffled)
     for s, scene_name in enumerate(scenes):
@@ -143,6 +168,7 @@ def get_dataset(eval=False):
         objects = scene_df['obj_id'].unique()
         # save the scene name 
         scene_dict[len(master_X)] = [scene_name]
+        drop_step_dict[len(master_X)] = scene_df['drop_step'].unique()[0]
 
         # get each object's track
         tracks = []
@@ -154,17 +180,26 @@ def get_dataset(eval=False):
             track = scene_df[SEQUENCE_FEATURES].iloc[track_idx].to_numpy().astype(np.float64)
 
             # get the packed sequence of positions
-            track = torch.tensor(track).unsqueeze(0)    
+            track = torch.tensor(track).unsqueeze(0)
+
+            # # skip scenes without occlusion events, unless we're in gravity
+            # if len(find_gaps(track[:, :, -1].squeeze())) == 0 and "grav" not in scene_name:
+            #     print(scene_name, "quitting")
+            #     continue
+
             # add the new true trajectory to the dataset
             track_length.append(torch.max(track[:, :, -1]))
             
             # save the seqeunce without any padding
             tracks.append(track)
 
+        if len(tracks) == 0:
+            continue
+
         master_X.append(tracks)
         track_lengths.append(track_length)
 
-    return master_X, track_lengths, scene_dict
+    return master_X, track_lengths, scene_dict, drop_step_dict
 
 def find_gaps(timesteps):
     """Generate the gaps in the list of timesteps."""
@@ -182,10 +217,24 @@ def get_gt(scene_name, dir):
     return pd.read_csv(f"{dir}/{scene_name}/gt.txt", header=None, names=features)
 
 def get_deltas(source):
+    # go down to the absolute basics
+    unpadded_idx = torch.where(source != PAD)
+    unpadded = source[:, torch.unique(unpadded_idx[1]), :]
+    unmasked_idx = torch.where(unpadded != MASK)
+    unmasked = unpadded[:, torch.unique(unmasked_idx[1]), :]
+    
     # subtract the initial position of the trajectory from each position in trajectory to delta-ize
-    comp_x = torch.cat((source[:, 0, :].unsqueeze(1), source[:, :-1, :]), axis=1)
-    deltas = torch.sub(source, comp_x)
-    return deltas
+    comp_x = torch.cat((unmasked[:, 0, :].unsqueeze(1), unmasked[:, :-1, :]), axis=1)
+    deltas = torch.sub(unmasked, comp_x)
+
+    deltas = get_norm_from_deltas(deltas)
+
+    # replace the non MASK tokens from the unpadded sequence with the unmasked deltas
+    unpadded[:, torch.unique(unmasked_idx[1]), :] = deltas
+    # replace the non PAD tokens from the source sequence with the delta-ized unpadded sequence
+    source[:, torch.unique(unpadded_idx[1]), :] = unpadded
+
+    return source
 
 def get_self_normalized(source):
     pass
@@ -193,7 +242,7 @@ def get_self_normalized(source):
 def get_norm_from_deltas(src):
     # first position is always (0,0,0)
     # after that, values are added
-    return torch.cumsum(src, axis=0)
+    return torch.cumsum(src, axis=1)
 
 class MCS_Sequence_Dataset(Dataset):
     def __init__(self, eval=False) -> None:
@@ -202,11 +251,12 @@ class MCS_Sequence_Dataset(Dataset):
         self.eval = eval
 
         # get all our data
-        X, L, S = get_dataset(eval=eval)
+        X, L, S, D = get_dataset(eval=eval)
 
         self.data = {i: X[i] for i in range(len(X))}
         self.lengths = L
         self.scene_names = S
+        self.drop_steps = D
 
         self.max_length = 300
 
@@ -237,7 +287,7 @@ class MCS_Sequence_Dataset(Dataset):
                 (100, 100)
             ),
             torchvision.transforms.ToTensor(),
-            # torchvision.transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            torchvision.transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
             # ShiftToMean()
         ])
         depth_transform = torchvision.transforms.Compose([
@@ -289,7 +339,7 @@ class MCS_Sequence_Dataset(Dataset):
 
         return rgb, depth
     
-    def mask_input(self, src, timesteps):
+    def mask_input(self, src, timesteps, name):
         # make source timestep first
         src = src.permute(1, 0, 2)
         max_t = int(timesteps[-1])
@@ -311,7 +361,7 @@ class MCS_Sequence_Dataset(Dataset):
         # return new source as batch first
         return new_src.permute(1, 0, 2), masked_idx
 
-    def cook_tracks(self, object_tracks, track_lengths, scene_name, eval=False):
+    def cook_tracks(self, object_tracks, track_lengths, scene_name, drop_Step, eval=False):
         # given N object tracks (x,y,z,t) from a single scene
         max_length = max(track_lengths)
         n = len(object_tracks)
@@ -326,8 +376,10 @@ class MCS_Sequence_Dataset(Dataset):
             
             # get the timesteps in which the object is visible
             time = track[:, -1]
-            # for t in time.view(-1):
-                # timesteps[t.int(), i] = t
+            if "grav_" in scene_name:
+                indx = torch.where(time <= drop_Step)
+                indx = torch.cat((indx[0], torch.full((1,), time.size(0) - 1).long()))
+                time = time[indx]
 
             # get the bboxes of the object in which the object is visible
             bboxes = track[:, 3:-1]
@@ -343,8 +395,7 @@ class MCS_Sequence_Dataset(Dataset):
 
             track = track[:, :3]
             # track = get_deltas(track.unsqueeze(0))
-            track, masked_idx = self.mask_input(track.unsqueeze(0), time)
-            
+            track, masked_idx = self.mask_input(track.unsqueeze(0), time, scene_name)
             src[i, :track.shape[1], :] = track
 
         rgb_images = [img.unsqueeze(0) for img in rgb_images[0]]
@@ -355,7 +406,12 @@ class MCS_Sequence_Dataset(Dataset):
 
         return src, time, rgb_images, depth_images, masked_idx
 
-    def get_masked_data(self, src, timesteps, scene_name, root=dataset_dir):
+    def get_masked_data(self, src, timesteps, scene_name, eval=False):
+        if eval:
+            root = validation_dir
+        else:
+            root = dataset_dir
+
         root_folder = os.path.join(root, scene_name)
 
         target = src.detach().clone()
@@ -372,16 +428,17 @@ class MCS_Sequence_Dataset(Dataset):
                 hidden_xyz = list(step_meta['object_list'][k[0]]['position'].values())
                 target[:, t - 1, :] = torch.Tensor(hidden_xyz)
         
-        return target                
+        return target
 
     def __getitem__(self, index):
         scene = self.data[index]
         track_lengths = self.lengths[index]
         scene_name = self.scene_names[index]
+        drop_step = self.drop_steps[index]
 
-        src, timesteps, rgb, depth, masked_ = self.cook_tracks(scene, track_lengths, scene_name[0], self.eval)
+        src, timesteps, rgb, depth, masked_ = self.cook_tracks(scene, track_lengths, scene_name[0], drop_step, self.eval)
 
-        truth = self.get_masked_data(src, timesteps, scene_name[0])
+        truth = self.get_masked_data(src, timesteps, scene_name[0], self.eval)
         
         input_image = torch.cat([rgb, depth], axis=1)
 
@@ -390,11 +447,13 @@ class MCS_Sequence_Dataset(Dataset):
         # right side padding of source seqeunce
         seq = torch.full((self.max_length, 3), PAD)
         seq[:src.size(1), :] = src.squeeze()
+        seq = get_deltas(seq.unsqueeze(0)).squeeze(0)
 
         # right side padding of target
         target = torch.full((self.max_length, 3), PAD)
         target[:truth.size(1), :] = truth.squeeze()
-
+        target = get_deltas(target.unsqueeze(0)).squeeze(0)
+        
         time = torch.full((self.max_length, 1), PAD)
         time[:timesteps.size(0)] = timesteps.unsqueeze(1)
 
@@ -409,6 +468,7 @@ class MCS_Sequence_Dataset(Dataset):
 def eval(model, val_set, export_flag=False):
     model.eval()
     losses = []
+    outputs = []
     
     with torch.no_grad():
         for i, output in enumerate(tqdm(val_set)):
@@ -417,15 +477,22 @@ def eval(model, val_set, export_flag=False):
             # print(src[masked_idx[length[:, 1].long()].long()].shape)
             output = model(src, timesteps, input_images, length)
 
+            # outputs.append([src.detach().squeeze(), output.detach().squeeze(), target.detach().squeeze(), scene_name, timesteps])
+            
             loss = 0
             for j in range(length.size(0)):
-                # get masked idx of output
-                idcs = masked_idx[j, :length[j, 1].long()].long()
-                loss += criterion(output[j, idcs].squeeze(), target[j, idcs].squeeze().cuda())
+                # get masked idx of output        
+                idx = torch.where(src[j] != PAD)
+                idx = torch.unique(idx[0])
 
-            losses.append(loss.detach().item() / batch_size)
+                if len(idx) == 0:
+                    continue
 
-            writer.add_scalar("Loss/val", loss.item() / batch_size, (epoch * len(val_set)) + i)
+                loss += criterion(output[j, idx].permute(1, 0, 2), target[j, idx].unsqueeze(0).cuda())
+
+            losses.append(loss.mean().detach().item())
+
+            writer.add_scalar("Loss/val", loss.mean().item(), (epoch * len(val_set)) + i)
 
     print(f"epoch {epoch:3d} - avg val loss={np.mean(losses)} - lr = {lr}")
 
@@ -434,38 +501,34 @@ def eval(model, val_set, export_flag=False):
 
 def train(model, train_set, epoch=0):
     model.train()
-    total_loss = 0
-    log_interval = 50
     losses = []
-    total_correct = 0
-    
-    plaus_correct = 0
-    plaus_incorrect = 0
-
-    implaus_correct = 0
-    implaus_incorrect = 0
 
     for i, output in enumerate(tqdm(train_set)):
         optimizer.zero_grad()
         src, timesteps, input_images, length, target, scene_name, masked_idx = output[0], output[1], output[2], output[3], output[4], output[5], output[6]
-        # print(src[masked_idx[length[:, 1].long()].long()].shape)
+
         output = model(src, timesteps, input_images, length)
+        
         # calc loss
         loss = 0
         for j in range(length.size(0)):
-            # get masked idx of output
-            idcs = masked_idx[j, :length[j, 1].long()].long()
-            loss += criterion(output[j, idcs].squeeze(), target[j, idcs].squeeze().cuda())
+            # get masked idx of output        
+            idx = torch.where(src[j] != PAD)
+            idx = torch.unique(idx[0])
+            if len(idx) == 0:
+                continue
 
-        loss.backward()
+            loss += criterion(output[j, idx].permute(1, 0, 2), target[j, idx].unsqueeze(0).cuda())
+
+        loss.mean().backward()
         
-        # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=2.0)
+        # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
 
         # lr = optimizer.param_groups[0]['lr']
-        writer.add_scalar("Loss/train", loss.item() / batch_size, (epoch * len(train_set)) + i)
-        losses.append(loss.item() / batch_size)
-        print(f"epoch {epoch:3d} - batch {i:5d}/{len(train_set)} - loss={loss.item() / batch_size} - lr = {lr}")
+        writer.add_scalar("Loss/train", loss.mean(), (epoch * len(train_set)) + i)
+        losses.append(loss.detach().item())
+        print(f"epoch {epoch:3d} - batch {i:5d}/{len(train_set)} - loss={loss.mean()} - lr = {lr}")
 
     return losses
 
@@ -476,7 +539,7 @@ if __name__ == "__main__":
             'num_workers': 1,
             'pin_memory': True
             }
-    max_epochs = 100
+    max_epochs = 20
 
     # grab the dataset
     full_dataset = MCS_Sequence_Dataset()
@@ -490,7 +553,7 @@ if __name__ == "__main__":
 
     # okay let's start training
     # img_enc_dim = 128
-    img_enc_dim = 256**2
+    img_enc_dim = 512
     model = TransformerModel_XYZRGBD(img_enc_dim + 3, 128, 8, 128, 2, 0.2).cuda()
     
     # if pretrained_weights:
@@ -526,7 +589,8 @@ if __name__ == "__main__":
             best_model = model.state_dict()
             best_epoch = epoch
             # save model weights
-            torch.save(best_model, f"./{epoch}_batch_{batch_size}_xyz_rgbd_lr_{lr}_sequence_mask_model.pth")
+            torch.save(best_model, f"./{epoch}_batch_{batch_size}_xyz_delta_pretrained_resnet_lr_{lr}_sequence_model.pth")
+            # val_outputs.append(v_o)
 
         avg_train_losses.append(np.mean(train_losses))
         avg_val_losses.append(np.mean(val_losses))
@@ -539,36 +603,58 @@ if __name__ == "__main__":
     ax.plot(range(len(avg_train_losses)), avg_train_losses, label='Training Loss')
     ax.plot(range(len(avg_val_losses)), avg_val_losses, label='Validation Loss')
     ax.set_xlabel('Epochs')
-    ax.set_ylabel('Huber Loss')
+    ax.set_ylabel('MSE Loss')
     ax.legend()
 
     # ax = fig.add_subplot(122, projection='3d')
     # val_outputs.reverse()
     # for info in val_outputs:
-    #     src, output, name, length = info[0], info[1], info[2], info[3]
-    #     ax.set_title(name)
-    #     # print("name", name)
-    #     # print("length", length)
-    #     # print(output)
+    #     src, output, target, name, time = info[0][0], info[0][1], info[0][2], info[0][3], info[0][4]
+    #     for j in range(src.size(0)):
+    #         ax.set_title(name[j])
+    #         # print("name", name)
+    #         # print("length", length)
+    #         # print(output)
 
-    #     # target
-    #     x = src[:, :, 0].reshape(-1).cpu().numpy()
-    #     y = src[:, :, 1].reshape(-1).cpu().numpy()
-    #     z = src[:, :, 2].reshape(-1).cpu().numpy()
-    #     ax.scatter(x,y,z,c='red', label="source trajectory")
 
-    #     # src = get_norm_from_deltas(src)
-    #     x = src[:, :, 0].reshape(-1).cpu().numpy()
-    #     y = src[:, :, 1].reshape(-1).cpu().numpy()
-    #     z = src[:, :, 2].reshape(-1).cpu().numpy()
-    #     ax.scatter(x,y,z,c='blue',label="target trajectory")
+    #         unpad_idx = torch.where(src[j] != PAD)
+    #         unpad_idx = torch.unique(unpad_idx[0])
+    #         unpadded_src = src[j, unpad_idx]
+    #         unpadded_output = output[j, unpad_idx].unsqueeze(1)
+    #         unpadded_target = target[j, unpad_idx].unsqueeze(1)
+            
+    #         unmasked_idx = torch.where(unpadded_src != MASK)
+    #         unmasked_idx = torch.unique(unmasked_idx[0])
+    #         unmasked_src = unpadded_src[unmasked_idx].unsqueeze(1)
+            
+    #         # target
+    #         # unpadded_target = get_norm_from_deltas(unpadded_target)
+    #         print("unpadded_target.shape")
+    #         print(unpadded_target)
+    #         x = unpadded_target[:, :, 0].reshape(-1).cpu().numpy()
+    #         z = unpadded_target[:, :, 1].reshape(-1).cpu().numpy()
+    #         y = unpadded_target[:, :, 2].reshape(-1).cpu().numpy()
+    #         ax.scatter(x,y,z,c='green', label="target trajectory")
 
-    #     # output = get_norm_from_deltas(output)
-    #     x = output[:, :, 0].reshape(-1).cpu().numpy()
-    #     y = output[:, :, 1].reshape(-1).cpu().numpy()
-    #     z = output[:, :, 2].reshape(-1).cpu().numpy()
-    #     ax.scatter(x,y,z,c='green',label="output trajectory")
+    #         # unmasked_src = get_norm_from_deltas(unmasked_src)
+    #         print("unmasked_src.shape")
+    #         print(unmasked_src)
+    #         x = unmasked_src[:, :, 0].reshape(-1).cpu().numpy()
+    #         z = unmasked_src[:, :, 1].reshape(-1).cpu().numpy()
+    #         y = unmasked_src[:, :, 2].reshape(-1).cpu().numpy()
+    #         ax.scatter(x,y,z,c='blue',label="source trajectory")
 
+    #         # unpadded_output = get_norm_from_deltas(unpadded_output)
+    #         print("unpadded_output.shape")
+    #         print(unpadded_output.shape)
+    #         print(unpadded_output)
+    #         x = unpadded_output[:, :, 0].reshape(-1).cpu().numpy()
+    #         z = unpadded_output[:, :, 1].reshape(-1).cpu().numpy()
+    #         y = unpadded_output[:, :, 2].reshape(-1).cpu().numpy()
+    #         ax.scatter(x,y,z,c='red',label="output trajectory")
+
+    #         break
+        
     #     break
 
     # ax.set_xlabel('X')

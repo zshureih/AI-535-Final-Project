@@ -1,5 +1,7 @@
 from operator import mod
-from predict import MCS_Sequence_Dataset
+
+from numpy import block
+from train_mask_prediction_xyz_rgbd import MCS_Sequence_Dataset
 import re
 import pandas as pd
 import numpy as np
@@ -12,8 +14,12 @@ from torch.utils.data import random_split
 from torch import nn
 from torch.nn.utils.rnn import pad_packed_sequence, pack_padded_sequence
 from torch.utils.data.dataset import Dataset
-# from sequence_model import TransformerModel, generate_square_subsequent_mask
+from sequence_model import TransformerModel_XYZRGBD, generate_square_subsequent_mask
 import matplotlib.pyplot as plt
+from tqdm import tqdm
+
+MASK = 99.
+PAD = -99.
 
 def mask_input(src, timesteps, min_k=5):
     src = src.permute(1, 0, 2).cuda()
@@ -43,86 +49,105 @@ def get_norm_from_deltas(src):
     # first position is always (0,0,0)
     # after that, values are added
     return torch.cumsum(src, axis=1)
+
+def save_traj_figure(src, target, output, name, loss):
+    fig = plt.figure(figsize=(6, 4))
+    ax = fig.add_subplot(111, projection='3d')
+    ax.set_title(f"{name} - Total Track Loss={loss.item():04f}")
+
+    unpad_idx = torch.where(src != PAD)
+    unpad_idx = torch.unique(unpad_idx[0])
+    unpadded_src = src[unpad_idx]
+    unpadded_output = output[unpad_idx]
+    unpadded_target = target[unpad_idx].unsqueeze(1)
+    
+    unmasked_idx = torch.where(unpadded_src != MASK)
+    unmasked_idx = torch.unique(unmasked_idx[0])
+    unmasked_src = unpadded_src[unmasked_idx].unsqueeze(1)
+    
+    # target
+    # unpadded_target = get_norm_from_deltas(unpadded_target)
+    x = unpadded_target[:, :, 0].reshape(-1).cpu().numpy()
+    z = unpadded_target[:, :, 1].reshape(-1).cpu().numpy()
+    y = unpadded_target[:, :, 2].reshape(-1).cpu().numpy()
+    ax.plot(x,y,z,c='green', label="target trajectory")
+    ax.scatter(x,y,z,c='green', label="target trajectory")
+
+    # unmasked_src = get_norm_from_deltas(unmasked_src)
+    x = unmasked_src[:, :, 0].reshape(-1).cpu().numpy()
+    z = unmasked_src[:, :, 1].reshape(-1).cpu().numpy()
+    y = unmasked_src[:, :, 2].reshape(-1).cpu().numpy()
+    ax.plot(x,y,z,c='blue',label="source trajectory")
+    ax.scatter(x,y,z,c='blue',label="source trajectory")
+
+    # unpadded_output = get_norm_from_deltas(unpadded_output)
+    x = unpadded_output[:, :, 0].reshape(-1).cpu().numpy()
+    z = unpadded_output[:, :, 1].reshape(-1).cpu().numpy()
+    y = unpadded_output[:, :, 2].reshape(-1).cpu().numpy()
+    ax.plot(x,y,z,c='red',label="output trajectory")
+    ax.scatter(x,y,z,c='red',label="output trajectory")
+
+    ax.set_xlabel('X')
+    ax.set_ylabel('Z')
+    ax.set_zlabel('Y')
+    ax.legend()
+
+    ax.set_xlim([-10, 10])
+    ax.set_ylim([-10, 10])
+    ax.set_zlim([-10, 10])
+    # plt.show(block=True)
+    plt.savefig(f"{name}-{loss.item()}.jpg")
+    plt.close()
+
     
 if __name__ == "__main__":
-    params = {'batch_size': 1,
+    params = {'batch_size': 3,
             'shuffle': True,
-            'num_workers': 3}
+            'num_workers': 1}
 
-    full_dataset = MCS_Sequence_Dataset()
-    train_size = int(0.8 * len(full_dataset))
-    val_size = len(full_dataset) - train_size
-    train_dataset, test_dataset = random_split(full_dataset, [train_size, val_size])
+    full_dataset = MCS_Sequence_Dataset(eval=True)
+    # train_size = int(0.8 * len(full_dataset))
+    # val_size = len(full_dataset) - train_size
+    # train_dataset, test_dataset = random_split(full_dataset, [train_size, val_size])
 
-    train_generator = torch.utils.data.DataLoader(train_dataset, **params)
-    test_generator = torch.utils.data.DataLoader(test_dataset, **params)
+    full_generator = torch.utils.data.DataLoader(full_dataset, **params)
 
     # okay let's start evaluating
-    lr = 0.00001  # learning rate
-    model = TransformerModel(3, 128, 8, 128, 2, 0.2).cuda()
-    model.load_state_dict(torch.load("100_delta_model.pth"))
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    criterion = nn.HuberLoss()
+    lr = 1e-3  # learning rate
 
-    def eval(model, val_set):
+    img_enc_dim = 512
+    model = TransformerModel_XYZRGBD(img_enc_dim + 3, 128, 8, 128, 2, 0.2).cuda()
+    model.load_state_dict(torch.load("12_batch_12_xyz_delta_pretrained_resnet_lr_0.0001_sequence_model.pth"))
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    criterion = nn.MSELoss()
+
+    def eval(model, val_set, export_flag=False):
         model.eval()
         losses = []
-        outputs = []
-
-        best_loss = np.inf
-
-        with torch.no_grad():
-            for src, timesteps, scene_names, lengths in val_set:
-                optimizer.zero_grad()
-
-                src = get_deltas(src) # get our deltas
-                # src, target, mask_idx = mask_input(src, timesteps) # mask some of the inputs
-                src_mask = generate_square_subsequent_mask(src.size(0)).cuda()
-                
-                output = model(src, src_mask)
-                total_loss = criterion(output, src)
-
-                outputs.append([src, output, scene_names, lengths])
-
-                losses.append([total_loss.item()])
-
-        return outputs, losses
-
-    outputs, losses = eval(model, test_generator)
-
-    for out in zip(outputs, losses):
-        fig = plt.figure(figsize=(6, 4))
         
-        info = out[0]
-        loss = out[1]
-        src, output, name, length = info[0], info[1], info[2], info[3]
+        with torch.no_grad():
+            for i, output in enumerate(tqdm(val_set)):
+                src, timesteps, input_images, length, target, scene_name, masked_idx = output[0], output[1], output[2], output[3], output[4], output[5], output[6]
 
-        ax = fig.add_subplot(111, projection='3d')
-        ax.set_title(f"{name} - Total Track Loss={loss[0]:04f}")
+                # print(src[masked_idx[length[:, 1].long()].long()].shape)
+                output = model(src, timesteps, input_images, length)
+                
+                loss = 0
+                for j in range(length.size(0)):
+                    # get masked idx of output        
+                    idx = torch.where(src[j] == MASK)
+                    idx = torch.unique(idx[0])
 
-        # x = target[:, :, 0].reshape(-1).cpu().numpy()
-        # y = target[:, :, 1].reshape(-1).cpu().numpy()
-        # z = target[:, :, 2].reshape(-1).cpu().numpy()
-        # ax.scatter(x,y,z,c='red', label="source trajectory")
+                    if len(idx) == 0:
+                        continue
 
-        src = get_norm_from_deltas(src)
-        x = src[:, :, 0].reshape(-1).cpu().numpy()
-        y = src[:, :, 1].reshape(-1).cpu().numpy()
-        z = src[:, :, 2].reshape(-1).cpu().numpy()
-        ax.scatter(x,y,z,c='blue',label="target trajectory")
+                    l = criterion(output[j, idx].permute(1, 0, 2), target[j, idx].unsqueeze(0).cuda())
 
-        output = get_norm_from_deltas(output)
-        x = output[:, :, 0].reshape(-1).cpu().numpy()
-        y = output[:, :, 1].reshape(-1).cpu().numpy()
-        z = output[:, :, 2].reshape(-1).cpu().numpy()
-        ax.scatter(x,y,z,c='green',label="output trajectory")
+                    # visualize the plot the trajectories and save the output
+                    save_traj_figure(src[j], target[j], output[j], scene_name[j], l)
 
-        ax.set_xlabel('X')
-        ax.set_ylabel('Z')
-        ax.set_zlabel('Y')
-        ax.set_xticks(range(-10, 10))
-        ax.set_yticks(range(-10, 10))
-        ax.set_zticks(range(-10, 1))
-        ax.legend()
+                    loss += l
+                
+        return losses
 
-        plt.show(block=True)
+    losses = eval(model, full_generator)
