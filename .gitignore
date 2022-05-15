@@ -129,3 +129,5 @@ dmypy.json
 .pyre/
 
 eval5_dataset*
+*.pth
+*.txt
