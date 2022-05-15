@@ -151,7 +151,7 @@ class TransformerModel_XYZRGBD(nn.Module):
             images = input_images[i, :lengths[i, 1].long()]
 
             # start processing our images
-            inputs = torch.full((unpadded_x.size(1), self.input_dim - 3), MASK).cuda()
+            inputs = torch.full((unpadded_x.size(1), self.input_dim - 3), 0.).cuda()
             img_enc = self.img_encoder(images.cuda())
             flattened_enc = torch.reshape(img_enc, (img_enc.shape[0], self.input_dim - 3))
             inputs[unmmask_idx, :] = flattened_enc
