@@ -58,7 +58,6 @@ def save_traj_figure(src, target, output, name, loss):
     unpad_idx = torch.where(src != PAD)
     unpad_idx = torch.unique(unpad_idx[0])
     unpadded_src = src[unpad_idx]
-    unpadded_output = output[unpad_idx]
     unpadded_target = target[unpad_idx].unsqueeze(1)
     
     unmasked_idx = torch.where(unpadded_src != MASK)
@@ -81,9 +80,9 @@ def save_traj_figure(src, target, output, name, loss):
     ax.scatter(x,y,z,c='blue',label="source trajectory")
 
     # unpadded_output = get_norm_from_deltas(unpadded_output)
-    x = unpadded_output[:, :, 0].reshape(-1).cpu().numpy()
-    z = unpadded_output[:, :, 1].reshape(-1).cpu().numpy()
-    y = unpadded_output[:, :, 2].reshape(-1).cpu().numpy()
+    x = output[:, :, 0].reshape(-1).cpu().numpy()
+    z = output[:, :, 1].reshape(-1).cpu().numpy()
+    y = output[:, :, 2].reshape(-1).cpu().numpy()
     ax.plot(x,y,z,c='red',label="output trajectory")
     ax.scatter(x,y,z,c='red',label="output trajectory")
 
@@ -117,7 +116,7 @@ if __name__ == "__main__":
 
     img_enc_dim = 512
     model = TransformerModel_XYZRGBD(img_enc_dim + 3, 128, 8, 128, 2, 0.2).cuda()
-    model.load_state_dict(torch.load("12_batch_12_xyz_delta_pretrained_resnet_lr_0.0001_sequence_model.pth"))
+    model.load_state_dict(torch.load("14_batch_12_xyz_pretrained_resnet_lr_0.0001_sequence_model.pth"))
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     criterion = nn.MSELoss()
 
@@ -135,13 +134,13 @@ if __name__ == "__main__":
                 loss = 0
                 for j in range(length.size(0)):
                     # get masked idx of output        
-                    idx = torch.where(src[j] == MASK)
+                    idx = torch.where(src[j] != PAD)
                     idx = torch.unique(idx[0])
 
                     if len(idx) == 0:
                         continue
 
-                    l = criterion(output[j, idx].permute(1, 0, 2), target[j, idx].unsqueeze(0).cuda())
+                    l = criterion(output[j].permute(1, 0, 2), target[j, idx].unsqueeze(0).cuda())
 
                     # visualize the plot the trajectories and save the output
                     save_traj_figure(src[j], target[j], output[j], scene_name[j], l)

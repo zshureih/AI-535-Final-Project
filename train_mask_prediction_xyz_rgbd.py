@@ -27,22 +27,22 @@ from sequence_model import TransformerModel_XYZRGBD, generate_square_subsequent_
 SEQUENCE_FEATURES = ["3d_pos_x","3d_pos_y","3d_pos_z", "2d_bbox_x", "2d_bbox_y", "2d_bbox_w", "2d_bbox_h", "timestep"]
 IMG_FEATURES = []
 SEQUENCE_DIM = len(SEQUENCE_FEATURES)
-batch_size = 2
+batch_size = 12
 lr = 1e-4
 
 MASK = 99.
 PAD = -99.
 
 torch.multiprocessing.set_sharing_strategy('file_system')
-writer = SummaryWriter(f"/home/zshureih/MCS/opics/output/logs/batch_{batch_size}_xyz_delta_pretrained_resnet_sequence_mask_model_lr_{lr}")
+writer = SummaryWriter(f"/home/zshureih/MCS/opics/output/logs/batch_{batch_size}_xyz_pretrained_resnet_sequence_mask_model_lr_{lr}")
 
-# dataset_dir = "/media/zshureih/Hybrid Drive/eval_5_dataset_1"
+dataset_dir = "/media/zshureih/Hybrid Drive/eval_5_dataset"
 # dataset_dir = "/media/zshureih/Hybrid Drive/eval5_bug_set"
-# validation_dir = "/media/zshureih/Hybrid Drive/eval5_dataset_6"
+validation_dir = "/media/zshureih/Hybrid Drive/eval5_dataset_6"
 
-dataset_dir = os.path.join("C:", "\\Users", "Zeyad", "AI-535-Final-Project", "eval5_dataset_1")
+# dataset_dir = os.path.join("C:", "\\Users", "Zeyad", "AI-535-Final-Project", "eval5_dataset_1")
 # dataset_dir = "/nfs/hpc/share/shureihz/opics_data/eval5_dataset_1"
-validation_dir = os.path.join("C:", "\\Users", "Zeyad", "AI-535-Final-Project", "eval5_dataset_1")
+# validation_dir = os.path.join("C:", "\\Users", "Zeyad", "AI-535-Final-Project", "eval5_dataset_1")
 
 # pretrained_weights = "/home/zshureih/MCS/opics/output/ckpts/13_mask_when_hidden_xyz_plus_rgbd_model_all_5.pth"
 
@@ -394,7 +394,6 @@ class MCS_Sequence_Dataset(Dataset):
             depth_images.append(depth)
 
             track = track[:, :3]
-            # track = get_deltas(track.unsqueeze(0))
             track, masked_idx = self.mask_input(track.unsqueeze(0), time, scene_name)
             src[i, :track.shape[1], :] = track
 
@@ -600,61 +599,5 @@ if __name__ == "__main__":
     ax.set_xlabel('Epochs')
     ax.set_ylabel('MSE Loss')
     ax.legend()
-
-    # ax = fig.add_subplot(122, projection='3d')
-    # val_outputs.reverse()
-    # for info in val_outputs:
-    #     src, output, target, name, time = info[0][0], info[0][1], info[0][2], info[0][3], info[0][4]
-    #     for j in range(src.size(0)):
-    #         ax.set_title(name[j])
-    #         # print("name", name)
-    #         # print("length", length)
-    #         # print(output)
-
-
-    #         unpad_idx = torch.where(src[j] != PAD)
-    #         unpad_idx = torch.unique(unpad_idx[0])
-    #         unpadded_src = src[j, unpad_idx]
-    #         unpadded_output = output[j, unpad_idx].unsqueeze(1)
-    #         unpadded_target = target[j, unpad_idx].unsqueeze(1)
-            
-    #         unmasked_idx = torch.where(unpadded_src != MASK)
-    #         unmasked_idx = torch.unique(unmasked_idx[0])
-    #         unmasked_src = unpadded_src[unmasked_idx].unsqueeze(1)
-            
-    #         # target
-    #         # unpadded_target = get_norm_from_deltas(unpadded_target)
-    #         print("unpadded_target.shape")
-    #         print(unpadded_target)
-    #         x = unpadded_target[:, :, 0].reshape(-1).cpu().numpy()
-    #         z = unpadded_target[:, :, 1].reshape(-1).cpu().numpy()
-    #         y = unpadded_target[:, :, 2].reshape(-1).cpu().numpy()
-    #         ax.scatter(x,y,z,c='green', label="target trajectory")
-
-    #         # unmasked_src = get_norm_from_deltas(unmasked_src)
-    #         print("unmasked_src.shape")
-    #         print(unmasked_src)
-    #         x = unmasked_src[:, :, 0].reshape(-1).cpu().numpy()
-    #         z = unmasked_src[:, :, 1].reshape(-1).cpu().numpy()
-    #         y = unmasked_src[:, :, 2].reshape(-1).cpu().numpy()
-    #         ax.scatter(x,y,z,c='blue',label="source trajectory")
-
-    #         # unpadded_output = get_norm_from_deltas(unpadded_output)
-    #         print("unpadded_output.shape")
-    #         print(unpadded_output.shape)
-    #         print(unpadded_output)
-    #         x = unpadded_output[:, :, 0].reshape(-1).cpu().numpy()
-    #         z = unpadded_output[:, :, 1].reshape(-1).cpu().numpy()
-    #         y = unpadded_output[:, :, 2].reshape(-1).cpu().numpy()
-    #         ax.scatter(x,y,z,c='red',label="output trajectory")
-
-    #         break
-        
-    #     break
-
-    # ax.set_xlabel('X')
-    # ax.set_ylabel('Z')
-    # ax.set_zlabel('Y')
-    # ax.legend()
 
     plt.show(block=True)

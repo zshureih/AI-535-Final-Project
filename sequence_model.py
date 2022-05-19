@@ -65,8 +65,9 @@ class TransformerModel_XYZRGBD(nn.Module):
         
         self.model_type = 'Transformer'
         
-        self.xyz_encoder = nn.Linear(input_dim, d_model)
-        
+        self.concat_encoder = nn.Linear(input_dim - 3 + d_model, d_model)
+        self.xyz_encoder = nn.Linear(3, d_model)
+
         # use pretrained resnet18
         self.img_encoder = models.resnet18(pretrained=True)
 
@@ -85,7 +86,7 @@ class TransformerModel_XYZRGBD(nn.Module):
         self.d_model = d_model
 
         # classification decoder
-        self.decoder = nn.Sequential(
+        self.xyz_decoder = nn.Sequential(
             nn.Linear(self.d_model, 128),
             nn.ReLU(),
             nn.Linear(128, 64),
@@ -156,11 +157,13 @@ class TransformerModel_XYZRGBD(nn.Module):
             flattened_enc = torch.reshape(img_enc, (img_enc.shape[0], self.input_dim - 3))
             inputs[unmmask_idx, :] = flattened_enc
 
+            x = self.relu(self.xyz_encoder(unpadded_x))
+
             # concat image encodings and xyz values, |S| x 1 x input_dim
-            x = torch.cat([inputs.unsqueeze(0), unpadded_x], axis=-1).permute(1, 0, 2)
+            x = torch.cat([inputs.unsqueeze(0), x], axis=-1).permute(1, 0, 2)
 
             # linear + positional encoding, |S| x 1 x d_model
-            x = self.relu(self.xyz_encoder(x))
+            x = self.relu(self.concat_encoder(x))
             x = self.pos_encoder(x)
 
             # This is super important according to experiments
@@ -168,7 +171,7 @@ class TransformerModel_XYZRGBD(nn.Module):
             output = self.transformer_encoder(x, x_mask)
             
             # transform the output of the encoder back into xyz, |S| x 1 x 3
-            output = self.decoder(output)
+            output = self.xyz_decoder(output)
 
             results.append(output)
 
