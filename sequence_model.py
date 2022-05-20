@@ -115,8 +115,10 @@ class TransformerModel_XYZRGBD(nn.Module):
 
         self.xyz_encoder.bias.data.zero_()
         self.xyz_encoder.weight.data.uniform_(-initrange, initrange)
+        self.concat_encoder.bias.data.zero_()
+        self.concat_encoder.weight.data.uniform_(-initrange, initrange)
 
-        self.decoder.apply(self.init_linear_weights)
+        self.xyz_decoder.apply(self.init_linear_weights)
 
 
     def forward(self, src: Tensor, timesteps: Tensor, input_images: Tensor, lengths: Tensor) -> Tensor:
