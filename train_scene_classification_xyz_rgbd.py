@@ -167,7 +167,6 @@ def get_dataset(eval=False):
 
         if len(tracks) > 1:
             for l in range(len(tracks)):
-                print(scene_name, tracks[l].shape, track_length[l])
                 scene_dict[len(master_X)] = [scene_name]
                 master_X.append([tracks[l]])
                 track_lengths.append([track_length[l]])
