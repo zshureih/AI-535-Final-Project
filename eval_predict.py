@@ -116,7 +116,7 @@ if __name__ == "__main__":
 
     img_enc_dim = 512
     model = TransformerModel_XYZRGBD(img_enc_dim + 3, 128, 8, 128, 2, 0.2).cuda()
-    model.load_state_dict(torch.load("14_batch_12_xyz_pretrained_resnet_lr_0.0001_sequence_model.pth"))
+    model.load_state_dict(torch.load("13_batch_12_xyz_delta_pretrained_resnet_lr_0.0001_sequence_model.pth"))
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     criterion = nn.MSELoss()
 

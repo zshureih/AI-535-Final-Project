@@ -21,22 +21,27 @@ import json
 
 from torch.utils.tensorboard import SummaryWriter
 
-from opics.pvoe.transformer.bool_models import TransformerModel_XYZRGBD, generate_square_subsequent_mask
+from bool_models import TransformerModel_XYZRGBD, generate_square_subsequent_mask
 
 SEQUENCE_FEATURES = ["3d_pos_x","3d_pos_y","3d_pos_z", "2d_bbox_x", "2d_bbox_y", "2d_bbox_w", "2d_bbox_h", "timestep"]
 IMG_FEATURES = []
 SEQUENCE_DIM = len(SEQUENCE_FEATURES)
-batch_size = 12
-lr = 1e-5
+batch_size = 6
+lr = 1e-4
+
+MASK = 99.
+PAD = -99.
 
 torch.multiprocessing.set_sharing_strategy('file_system')
-writer = SummaryWriter(f"/home/zshureih/MCS/opics/output/logs/pretrained_batch_{batch_size}_xyz_rgbd_model_lr_{lr}")
+writer = SummaryWriter(f"/home/zshureih/MCS/opics/output/logs/pretrained_batch_{batch_size}_xyz_rgbd_classification_freeze_resnet_lr_{lr}")
 
-dataset_dir = "C:\Users\Zeyad\AI-535-Final-Project\eval_5_dataset1"
+# dataset_dir = "C:\Users\Zeyad\AI-535-Final-Project\eval_5_dataset1"
 # dataset_dir = "/nfs/hpc/share/shureihz/opics_data/eval5_dataset_1"
-validation_dir = "C:\Users\Zeyad\AI-535-Final-Project\eval_5_dataset6"
+dataset_dir = "/media/zshureih/Hybrid Drive/eval_5_dataset"
+validation_dir = "/media/zshureih/Hybrid Drive/eval5_dataset_6"
+# validation_dir = "C:\Users\Zeyad\AI-535-Final-Project\eval_5_dataset6"
 
-pretrained_weights = "/home/zshureih/MCS/opics/output/ckpts/13_mask_when_hidden_xyz_plus_rgbd_model_all_5.pth"
+pretrained_weights = "/home/zshureih/MCS/opics/output/ckpts/13_batch_12_xyz_delta_projected_pretrained_resnet_lr_0.0001_sequence_model.pth"
 
 # define the features coming out of gt.txt
 features = [
@@ -110,11 +115,14 @@ def get_dataset(eval=False):
             for id in unique_objects:
                 entry_idx = np.where(df['obj_id'].to_numpy() == id)
                 if df.to_numpy()[entry_idx[0][0]][8] == 0:
-                    actors.append(id)
+                    if "grav" in scene_name and id == 1:
+                        non_actors.append(id)
+                    else:
+                        actors.append(id)
                 else:
                     non_actors.append(id)
 
-            if len(non_actors) == 2 and "coll_" in scene_name and "_plaus" in scene_name:
+            if len(non_actors) == 2 and ("coll_" in scene_name or "grav" in scene_name) and "_plaus" in scene_name:
                 # flip a coin and remove a non_actor
                 flip = np.random.randint(0, 2)
                 non_actors.remove(non_actors[flip])
@@ -184,10 +192,24 @@ def get_gt(scene_name, dir):
     return pd.read_csv(f"{dir}/{scene_name}/gt.txt", header=None, names=features)
 
 def get_deltas(source):
+     # go down to the absolute basics
+    unpadded_idx = torch.where(source != PAD)
+    unpadded = source[:, torch.unique(unpadded_idx[1]), :]
+    unmasked_idx = torch.where(unpadded != MASK)
+    unmasked = unpadded[:, torch.unique(unmasked_idx[1]), :]
+    
     # subtract the initial position of the trajectory from each position in trajectory to delta-ize
-    comp_x = torch.cat((source[:, 0, :].unsqueeze(1), source[:, :-1, :]), axis=1)
-    deltas = torch.sub(source, comp_x)
-    return deltas
+    comp_x = torch.cat((unmasked[:, 0, :].unsqueeze(1), unmasked[:, :-1, :]), axis=1)
+    deltas = torch.sub(unmasked, comp_x)
+
+    deltas = get_norm_from_deltas(deltas)
+
+    # replace the non MASK tokens from the unpadded sequence with the unmasked deltas
+    unpadded[:, torch.unique(unmasked_idx[1]), :] = deltas
+    # replace the non PAD tokens from the source sequence with the delta-ized unpadded sequence
+    source[:, torch.unique(unpadded_idx[1]), :] = unpadded
+
+    return source
 
 def get_self_normalized(source):
     pass
@@ -239,7 +261,7 @@ class MCS_Sequence_Dataset(Dataset):
                 (100, 100)
             ),
             torchvision.transforms.ToTensor(),
-            # torchvision.transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            torchvision.transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
             # ShiftToMean()
         ])
         depth_transform = torchvision.transforms.Compose([
@@ -295,9 +317,15 @@ class MCS_Sequence_Dataset(Dataset):
         # make source timestep first
         src = src.permute(1, 0, 2)
         max_t = int(timesteps[-1])
+        min_t = int(timesteps[0])
 
-        new_src = torch.full((max_t, 1, 3), 99.)
+        # start with everything masked
+        new_src = torch.full((max_t, 1, 3), MASK)
 
+        # make everything before the first visible timestep padding
+        new_src[:min_t - 1, :, :] = torch.full((min_t - 1, 1, 3), PAD)
+
+        # for each visible timestep, save the xyz location
         for i, t in enumerate(timesteps):
             new_src[t.int() - 1, :, :] = src[i, :, :]
 
@@ -310,7 +338,7 @@ class MCS_Sequence_Dataset(Dataset):
         n = len(object_tracks)
 
         # timesteps = np.zeros((max_length, n))
-        src = torch.full((n, int(max_length), 3), 99.)
+        src = torch.full((n, int(max_length), 3), PAD)
 
         rgb_images = []
         depth_images = []
@@ -335,9 +363,7 @@ class MCS_Sequence_Dataset(Dataset):
             depth_images.append(depth)
 
             track = track[:, :3]
-            # track = get_deltas(track.unsqueeze(0))
-            track = self.mask_input(track.unsqueeze(0), time)
-            
+            track = self.mask_input(track.unsqueeze(0), time)         
             src[i, :track.shape[1], :] = track
 
         rgb_images = [img.unsqueeze(0) for img in rgb_images[0]]
@@ -354,23 +380,23 @@ class MCS_Sequence_Dataset(Dataset):
         scene_name = self.scene_names[index]
 
         src, timesteps, rgb, depth = self.cook_tracks(scene, track_lengths, scene_name[0], self.eval)
-        
         plausibility = Tensor([1]) if "_plaus" in scene_name[0] else Tensor([0])
 
         input_image = torch.cat([rgb, depth], axis=1)
 
         length = Tensor([src.size(1), timesteps.size(0)])
 
-        item = torch.full((self.max_length, 3), 99.)
-        item[:src.size(1), :] = src.squeeze()
+        seq = torch.full((self.max_length, 3), PAD)
+        seq[:src.size(1), :] = src.squeeze()
+        seq = get_deltas(seq.unsqueeze(0)).squeeze(0)
 
-        time = torch.full((self.max_length, 1), -1)
+        time = torch.full((self.max_length, 1), PAD)
         time[:timesteps.size(0)] = timesteps.unsqueeze(1)
 
         images = torch.zeros((self.max_length, 4, 100, 100))
         images[:timesteps.size(0)] = input_image
 
-        return item, time, images, length, plausibility, scene_name[0]
+        return seq, time, images, length, plausibility, scene_name[0]
 
 def eval(model, val_set, export_flag=False):
     model.eval()
@@ -389,13 +415,12 @@ def eval(model, val_set, export_flag=False):
             src, timesteps, input_images, length, plausibility, scene_name = output[0], output[1], output[2], output[3], output[4], output[5]
         
             output = model(src, timesteps, input_images, length)
-            
             loss = criterion(output.squeeze(-1), plausibility.cuda())
 
-            losses.append(loss.detach().item())
+            losses.append(loss.detach().cpu().item())
 
             for j in range(len(output)):
-                if output[j].detach().item() < 0.5:
+                if output[j].detach().cpu().item() < 0.5:
                     rating = 0
                 else:
                     rating = 1
@@ -414,9 +439,9 @@ def eval(model, val_set, export_flag=False):
             
                 if i == 0:
                     grid = torchvision.utils.make_grid(input_images[0, j, :3, :, :])
-                    writer.add_image(f'{epoch} Val Scene {scene_name[j]} {plausibility[j]}-{output[j]}', grid)
+                    writer.add_image(f'{epoch} Val Scene {scene_name[j]} {plausibility[j]}-{output[j].detach().cpu().item()}', grid)
 
-            writer.add_scalar("Loss/val", loss.item(), (epoch * len(val_set)) + i)
+            writer.add_scalar("Loss/val", loss.detach().cpu().item(), (epoch * len(val_set)) + i)
 
 
     print(f"{plaus_correct + plaus_incorrect}:{implaus_correct + implaus_incorrect}")
@@ -452,10 +477,10 @@ def train(model, train_set, epoch=0):
         
         # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=2.0)
         optimizer.step()
-        total_loss += loss.detach().item()
+        total_loss += loss.detach().cpu().item()
 
         for j in range(len(output)):
-            if output[j].detach().item() < 0.5:
+            if output[j].detach().cpu().item() < 0.5:
                 rating = 0
             else:
                 rating = 1
@@ -473,8 +498,8 @@ def train(model, train_set, epoch=0):
                     implaus_incorrect += 1
 
         # lr = optimizer.param_groups[0]['lr']
-        writer.add_scalar("Loss/train", loss.item(), (epoch * len(train_set)) + i)
-        losses.append(loss.item())
+        writer.add_scalar("Loss/train", loss.detach().cpu().item(), (epoch * len(train_set)) + i)
+        losses.append(loss.detach().cpu().item())
         # print(f"epoch {epoch:3d} - batch {i:5d}/{len(train_set)} - loss={loss.item()} - lr = {lr}")
         total_loss = 0
     
@@ -487,7 +512,7 @@ if __name__ == "__main__":
     # Parameters
     params = {'batch_size': batch_size,
             'shuffle': True,
-            'num_workers': 8,
+            'num_workers': 6,
             'pin_memory': True
             }
     max_epochs = 100
@@ -503,13 +528,14 @@ if __name__ == "__main__":
     test_generator = torch.utils.data.DataLoader(test_dataset, **params)
 
     # okay let's start training
-    # img_enc_dim = 128
-    img_enc_dim = 256**2
+    img_enc_dim = 512
     model = TransformerModel_XYZRGBD(img_enc_dim + 3, 128, 8, 128, 2, 0.2).cuda()
-    
-    # if pretrained_weights:
-    #     model.load_state_dict(torch.load(pretrained_weights))
-    #     print("pretrained weights")
+    model.load_state_dict(torch.load(pretrained_weights))
+    model.init_classification_head()
+    for i, param in enumerate(model.img_encoder.parameters()):
+        if i == 0:
+            continue
+        param.requires_grad = False
 
     # TODO: try huber loss
     criterion = nn.BCELoss()

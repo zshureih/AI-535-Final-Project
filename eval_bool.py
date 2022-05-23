@@ -1,8 +1,10 @@
-from scripts.pvoe.transformer.train_scene_xyz_rgbd import MCS_Sequence_Dataset
-from opics.pvoe.transformer.bool_models import TransformerModel_XYZRGBD, generate_square_subsequent_mask
+from train_scene_classification_xyz_rgbd import MCS_Sequence_Dataset
+from bool_models import TransformerModel_XYZRGBD, generate_square_subsequent_mask
 import numpy as np
+import torchvision
 import torch
 from torch import nn, Tensor
+import torchvision.transforms.functional as F
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 
@@ -18,15 +20,15 @@ if __name__ == "__main__":
     # okay let's start evaluating
     lr = 5e-4  # learning rate
     # img_enc_dim = 64
-    img_enc_dim = 256**2
+    img_enc_dim = 512
     model = TransformerModel_XYZRGBD(img_enc_dim + 3, 128, 8, 128, 2, 0.2).cuda()
-    model.load_state_dict(torch.load("/home/zshureih/MCS/opics/output/ckpts/13_mask_when_hidden_xyz_plus_rgbd_model_all_5.pth"))
+    model.init_classification_head()
+    model.load_state_dict(torch.load("/home/zshureih/MCS/opics/output/ckpts/1_batch_14_xyz_rgbd_classifier_lr_0.0001.pth"))
     criterion = nn.BCELoss()
 
     def eval(model, val_set, export_flag=False):
         model.eval()
         losses = []
-        outputs = []
         incorrect_scenes = []
         total_correct = 0
         
@@ -38,43 +40,45 @@ if __name__ == "__main__":
 
         with torch.no_grad():
             for i, output in enumerate(tqdm(val_set)):
-                src, timesteps, input_images, scene_name = output[0], output[1], output[2], output[3]
-                
-                plausibility = Tensor([1]) if "_plaus" in scene_name[0] else Tensor([0])
-                output = model(src.cuda(), timesteps, input_images)
-                loss = criterion(output.squeeze(0), plausibility.cuda())
+                src, timesteps, input_images, length, plausibility, scene_name = output[0], output[1], output[2], output[3], output[4], output[5]
+            
+                output = model(src, timesteps, input_images, length)
+                loss = criterion(output.squeeze(-1), plausibility.cuda())
 
-                losses.append(loss.detach().item())
-                
-                # save losses, as well as scene specifics 
-                losses.append(loss.item())
-                outputs.append((scene_name[0], plausibility.detach().item(), output.detach().item()))
+                losses.append(loss.detach().cpu().item())
 
-                if output < 0.5:
-                    output = 0
-                else:
-                    output = 1
-                
-                if output == plausibility.item():
-                    if plausibility.item() == 1:
-                        plaus_correct += 1
+                for j in range(len(output)):
+                    if output[j].detach().cpu().item() < 0.5:
+                        rating = 0
                     else:
-                        implaus_correct += 1
-                    total_correct += 1
-                else:
-                    incorrect_scenes.append(scene_name)
-                    if plausibility.item() == 1:
-                        plaus_incorrect += 1
-                    else:
-                        implaus_incorrect += 1
-                print(f"running accuracy {total_correct}/{i+1}={total_correct / (i+1):04f}")
+                        rating = 1
 
-        print("val-accuracy:", total_correct / len(val_set))
+                    if rating == plausibility[j].item():
+                        if plausibility[j].item() == 1:
+                            plaus_correct += 1
+                        else:
+                            implaus_correct += 1
+                        total_correct += 1
+                    else:
+                        incorrect_scenes.append(scene_name)
+                        if plausibility[j].item() == 1:
+                            plaus_incorrect += 1
+                        else:
+                            implaus_incorrect += 1
+                
+                    if i == 0:
+                        grid = torchvision.utils.make_grid(input_images[0, j, :3, :, :])
+
+
+
+        print(f"{plaus_correct + plaus_incorrect}:{implaus_correct + implaus_incorrect}")
+        print("val-accuracy:", total_correct / (len(val_set)))
+
         confusion_matrix = [ [plaus_correct / (plaus_correct + plaus_incorrect), plaus_incorrect / (plaus_correct + plaus_incorrect)],
                             [implaus_incorrect / (implaus_correct + implaus_incorrect), implaus_correct / (implaus_correct + implaus_incorrect)]
                         ]
 
-        return total_correct / len(val_set), losses, incorrect_scenes, confusion_matrix
+        return total_correct / (len(val_set)), losses, incorrect_scenes, confusion_matrix
 
     accuracy, losses, _scenes, _m_conf = eval(model, full_generator)
 
@@ -88,6 +92,6 @@ if __name__ == "__main__":
 
     plt.show(block=True)
 
-    with open(f"home/zshureih/MCS/opics/output/ckpts/eval_5_mask_when_hidden_xyz_plus_rgbd_model.txt", "w+") as outfile:
+    with open(f"/home/zshureih/MCS/opics/output/ckpts/eval_5_mask_when_hidden_xyz_plus_rgbd_model_v2.txt", "w+") as outfile:
         for scene_name in _scenes:
             outfile.write(scene_name[0] + "\n")
