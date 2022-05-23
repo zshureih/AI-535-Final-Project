@@ -26,7 +26,7 @@ from bool_models import TransformerModel_XYZRGBD, generate_square_subsequent_mas
 SEQUENCE_FEATURES = ["3d_pos_x","3d_pos_y","3d_pos_z", "2d_bbox_x", "2d_bbox_y", "2d_bbox_w", "2d_bbox_h", "timestep"]
 IMG_FEATURES = []
 SEQUENCE_DIM = len(SEQUENCE_FEATURES)
-batch_size = 6
+batch_size = 14
 lr = 1e-4
 
 MASK = 99.
@@ -122,12 +122,7 @@ def get_dataset(eval=False):
                 else:
                     non_actors.append(id)
 
-            if len(non_actors) == 2 and ("coll_" in scene_name or "grav" in scene_name) and "_plaus" in scene_name:
-                # flip a coin and remove a non_actor
-                flip = np.random.randint(0, 2)
-                non_actors.remove(non_actors[flip])
-
-            if len(non_actors) != 1:
+            if len(non_actors) != 1 and not ("grav_" in scene_name or "coll_" in scene_name):
                 scenes = scenes[scenes != scene_name]
                 continue
             
@@ -152,7 +147,6 @@ def get_dataset(eval=False):
         scene_df = master_df.iloc[idx]
         objects = scene_df['obj_id'].unique()
         # save the scene name 
-        scene_dict[len(master_X)] = [scene_name]
 
         # get each object's track
         tracks = []
@@ -171,8 +165,16 @@ def get_dataset(eval=False):
             # save the seqeunce without any padding
             tracks.append(track)
 
-        master_X.append(tracks)
-        track_lengths.append(track_length)
+        if len(tracks) > 1:
+            for l in range(len(tracks)):
+                print(scene_name, tracks[l].shape, track_length[l])
+                scene_dict[len(master_X)] = [scene_name]
+                master_X.append([tracks[l]])
+                track_lengths.append([track_length[l]])
+        else:
+            scene_dict[len(master_X)] = [scene_name]
+            master_X.append(tracks)
+            track_lengths.append(track_length)
 
     return master_X, track_lengths, scene_dict
 
