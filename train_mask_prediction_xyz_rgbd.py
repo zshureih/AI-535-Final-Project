@@ -130,22 +130,31 @@ def get_dataset(eval=False):
             # get the unique object ids
             unique_objects = np.unique(df['obj_id'].to_numpy())
             df['scene_name'] = [scene_name for i in range(df.shape[0])]
-            df['drop_step'] = [-1 if "grav_" not in scene_name else get_drop_step(scene_name, master_dir) for i in range(df.shape[0])]
             actors = []
             non_actors = []
             # filter out betweeen actors and non-actors
             for id in unique_objects:
                 entry_idx = np.where(df['obj_id'].to_numpy() == id)
                 if df.to_numpy()[entry_idx[0][0]][8] == 0:
-                    actors.append(id)
+                    if "grav" in scene_name and id == 1:
+                        non_actors.append(id)
+                    else:
+                        actors.append(id)
                 else:
                     non_actors.append(id)
+
+            # flags to include multi object scenes
+            plaus_grav_scene = "grav_" in scene_name and "_plaus" in scene_name
+            plaus_coll_scene = "coll_" in scene_name and "_plaus" in scene_name
+            # sc_scene_2_implaus_obj = "sc_" in scene_name and "4_implaus" in scene_name
+            sc_scene_2_plaus_obj = "sc_" in scene_name and "2_plaus" in scene_name
             
-            if len(non_actors) != 1:
+            # if the scene has more than one focus object and not one of the above scene types, remove it from the set
+            if len(non_actors) != 1 and not (plaus_grav_scene or plaus_coll_scene or sc_scene_2_plaus_obj):
                 scenes = scenes[scenes != scene_name]
                 continue
-
-            # save non-actor tracks to master list
+            
+            # save non-actor (focus) tracks to master list
             for id in non_actors:
                 track_idx = np.where(df['obj_id'].to_numpy() == id)[0]
                 master_df = pd.concat([master_df, df.iloc[track_idx]], axis=0)
@@ -158,7 +167,6 @@ def get_dataset(eval=False):
     master_X = []
     track_lengths = []
     scene_dict = {}
-    drop_step_dict = {}
     shuffle(scenes)
     # for each scene name (shuffled)
     for s, scene_name in enumerate(scenes):
@@ -167,8 +175,6 @@ def get_dataset(eval=False):
         scene_df = master_df.iloc[idx]
         objects = scene_df['obj_id'].unique()
         # save the scene name 
-        scene_dict[len(master_X)] = [scene_name]
-        drop_step_dict[len(master_X)] = scene_df['drop_step'].unique()[0]
 
         # get each object's track
         tracks = []
@@ -180,26 +186,24 @@ def get_dataset(eval=False):
             track = scene_df[SEQUENCE_FEATURES].iloc[track_idx].to_numpy().astype(np.float64)
 
             # get the packed sequence of positions
-            track = torch.tensor(track).unsqueeze(0)
-
-            # # skip scenes without occlusion events, unless we're in gravity
-            # if len(find_gaps(track[:, :, -1].squeeze())) == 0 and "grav" not in scene_name:
-            #     print(scene_name, "quitting")
-            #     continue
-
+            track = torch.tensor(track).unsqueeze(0)    
             # add the new true trajectory to the dataset
             track_length.append(torch.max(track[:, :, -1]))
             
             # save the seqeunce without any padding
             tracks.append(track)
 
-        if len(tracks) == 0:
-            continue
+        if len(tracks) > 1:
+            for l in range(len(tracks)):
+                scene_dict[len(master_X)] = [scene_name]
+                master_X.append([tracks[l]])
+                track_lengths.append([track_length[l]])
+        else:
+            scene_dict[len(master_X)] = [scene_name]
+            master_X.append(tracks)
+            track_lengths.append(track_length)
 
-        master_X.append(tracks)
-        track_lengths.append(track_length)
-
-    return master_X, track_lengths, scene_dict, drop_step_dict
+    return master_X, track_lengths, scene_dict
 
 def find_gaps(timesteps):
     """Generate the gaps in the list of timesteps."""
@@ -251,12 +255,11 @@ class MCS_Sequence_Dataset(Dataset):
         self.eval = eval
 
         # get all our data
-        X, L, S, D = get_dataset(eval=eval)
+        X, L, S = get_dataset(eval=eval)
 
         self.data = {i: X[i] for i in range(len(X))}
         self.lengths = L
         self.scene_names = S
-        self.drop_steps = D
 
         self.max_length = 300
 
@@ -361,7 +364,7 @@ class MCS_Sequence_Dataset(Dataset):
         # return new source as batch first
         return new_src.permute(1, 0, 2), masked_idx
 
-    def cook_tracks(self, object_tracks, track_lengths, scene_name, drop_Step, eval=False):
+    def cook_tracks(self, object_tracks, track_lengths, scene_name, eval=False):
         # given N object tracks (x,y,z,t) from a single scene
         max_length = max(track_lengths)
         n = len(object_tracks)
@@ -433,9 +436,8 @@ class MCS_Sequence_Dataset(Dataset):
         scene = self.data[index]
         track_lengths = self.lengths[index]
         scene_name = self.scene_names[index]
-        drop_step = self.drop_steps[index]
 
-        src, timesteps, rgb, depth, masked_ = self.cook_tracks(scene, track_lengths, scene_name[0], drop_step, self.eval)
+        src, timesteps, rgb, depth, masked_ = self.cook_tracks(scene, track_lengths, scene_name[0], self.eval)
 
         truth = self.get_masked_data(src, timesteps, scene_name[0], self.eval)
         

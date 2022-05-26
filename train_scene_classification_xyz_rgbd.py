@@ -1,5 +1,3 @@
-import re
-import sched
 import pandas as pd
 import numpy as np
 from random import shuffle
@@ -17,7 +15,6 @@ import torchvision.transforms.functional as F
 import matplotlib.pyplot as plt
 import PIL.Image as Image
 from tqdm import tqdm
-import json
 
 from torch.utils.tensorboard import SummaryWriter
 
@@ -33,7 +30,7 @@ MASK = 99.
 PAD = -99.
 
 torch.multiprocessing.set_sharing_strategy('file_system')
-writer = SummaryWriter(f"/home/zshureih/MCS/opics/output/logs/pretrained_batch_{batch_size}_xyz_rgbd_classification_freeze_resnet_lr_{lr}")
+writer = SummaryWriter(f"/home/zshureih/MCS/opics/output/logs/pretrained_batch_{batch_size}_xyz_norm_rgbd_classification_freeze_resnet_lr_{lr}")
 
 # dataset_dir = "C:\Users\Zeyad\AI-535-Final-Project\eval_5_dataset1"
 # dataset_dir = "/nfs/hpc/share/shureihz/opics_data/eval5_dataset_1"
@@ -98,7 +95,7 @@ def get_dataset(eval=False):
 
     scenes = listdir(master_dir)
     shuffle(scenes)
-    scenes = np.array(scenes)
+    scenes = np.array(scenes)[:2000]
 
     # go through each scene
     for scene_name in np.unique(scenes):
@@ -122,11 +119,18 @@ def get_dataset(eval=False):
                 else:
                     non_actors.append(id)
 
-            if len(non_actors) != 1 and not ("grav_" in scene_name or "coll_" in scene_name):
+            # flags to include multi object scenes
+            plaus_grav_scene = "grav_" in scene_name and "_plaus" in scene_name
+            plaus_coll_scene = "coll_" in scene_name and "_plaus" in scene_name
+            sc_scene_2_implaus_obj = "sc_" in scene_name and "4_implaus" in scene_name and "A4" not in scene_name and "B4" not in scene_name and "C4" not in scene_name and "D4" not in scene_name
+            sc_scene_2_plaus_obj = "sc_" in scene_name and "2_plaus" in scene_name
+            
+            # if the scene has more than one focus object and not one of the above scene types, remove it from the set
+            if len(non_actors) != 1 and not (plaus_grav_scene or plaus_coll_scene or sc_scene_2_implaus_obj or sc_scene_2_plaus_obj):
                 scenes = scenes[scenes != scene_name]
                 continue
             
-            # save non-actor tracks to master list
+            # save non-actor (focus) tracks to master list
             for id in non_actors:
                 track_idx = np.where(df['obj_id'].to_numpy() == id)[0]
                 master_df = pd.concat([master_df, df.iloc[track_idx]], axis=0)
@@ -308,7 +312,6 @@ class MCS_Sequence_Dataset(Dataset):
 
             rgb_window = rgb_transform(rgb_im[int(min_y):int(max_y) + 1, int(min_x):int(max_x) + 1, :].permute(2, 0, 1))
             depth_window = depth_transform(depth_im[int(min_y):int(max_y) + 1, int(min_x):int(max_x) + 1, :].permute(2,0,1))
-
             rgb.append(rgb_window)
             depth.append(depth_window)
 
@@ -401,7 +404,7 @@ class MCS_Sequence_Dataset(Dataset):
 
 def eval(model, val_set, export_flag=False):
     model.eval()
-    losses = []
+    total_loss = 0
     incorrect_scenes = []
     total_correct = 0
     
@@ -418,7 +421,7 @@ def eval(model, val_set, export_flag=False):
             output = model(src, timesteps, input_images, length)
             loss = criterion(output.squeeze(-1), plausibility.cuda())
 
-            losses.append(loss.detach().cpu().item())
+            total_loss += loss.detach().cpu().item()
 
             for j in range(len(output)):
                 if output[j].detach().cpu().item() < 0.5:
@@ -452,14 +455,12 @@ def eval(model, val_set, export_flag=False):
                          [implaus_incorrect / (implaus_correct + implaus_incorrect), implaus_correct / (implaus_correct + implaus_incorrect)]
                        ]
 
-    return total_correct / (batch_size * len(val_set)), losses, incorrect_scenes, confusion_matrix
+    return total_correct / (batch_size * len(val_set)), total_loss / len(val_set), incorrect_scenes, confusion_matrix
 
 
 def train(model, train_set, epoch=0):
     model.train()
     total_loss = 0
-    log_interval = 50
-    losses = []
     total_correct = 0
     
     plaus_correct = 0
@@ -500,23 +501,22 @@ def train(model, train_set, epoch=0):
 
         # lr = optimizer.param_groups[0]['lr']
         writer.add_scalar("Loss/train", loss.detach().cpu().item(), (epoch * len(train_set)) + i)
-        losses.append(loss.detach().cpu().item())
         # print(f"epoch {epoch:3d} - batch {i:5d}/{len(train_set)} - loss={loss.item()} - lr = {lr}")
-        total_loss = 0
     
     print(f"{plaus_correct + plaus_incorrect}:{implaus_correct + implaus_incorrect}")
     print("train-accuracy:", total_correct / (batch_size * len(train_set)))
 
-    return losses, total_correct / (batch_size * len(train_set))
+    return loss / len(train_set), total_correct / (batch_size * len(train_set))
 
 if __name__ == "__main__":
     # Parameters
-    params = {'batch_size': batch_size,
+    params = {
+            'batch_size': batch_size,
             'shuffle': True,
-            'num_workers': 6,
-            'pin_memory': True
-            }
-    max_epochs = 100
+            'num_workers': 0,
+            # 'pin_memory': True
+        }
+    max_epochs = 20
 
     # grab the dataset
     full_dataset = MCS_Sequence_Dataset()
@@ -532,11 +532,9 @@ if __name__ == "__main__":
     img_enc_dim = 512
     model = TransformerModel_XYZRGBD(img_enc_dim + 3, 128, 8, 128, 2, 0.2).cuda()
     model.load_state_dict(torch.load(pretrained_weights))
-    model.init_classification_head()
-    for i, param in enumerate(model.img_encoder.parameters()):
-        if i == 0:
-            continue
+    for i, param in enumerate(model.parameters()):
         param.requires_grad = False
+    model.init_classification_head()
 
     # TODO: try huber loss
     criterion = nn.BCELoss()
@@ -558,7 +556,7 @@ if __name__ == "__main__":
     for epoch in range(max_epochs):
         print("epoch:", epoch)
 
-        train_losses, train_accuracies = train(model, train_generator, epoch)
+        avg_train_loss, train_accuracies = train(model, train_generator, epoch)
         writer.add_scalar("Acc/train", train_accuracies, epoch)
         val_accuracies, val_losses, incorrect, confusion = eval(model, test_generator, epoch)
         writer.add_scalar("Acc/val", val_accuracies, epoch)
@@ -573,8 +571,8 @@ if __name__ == "__main__":
             # save model weights
             torch.save(best_model, f"./{epoch}_batch_{batch_size}_xyz_rgbd_lr_{lr}.pth")
 
-        avg_train_losses.append(np.mean(train_losses))
-        avg_val_losses.append(np.mean(val_losses))
+        avg_train_losses.append(avg_train_loss)
+        avg_val_losses.append(val_losses)
         val_outputs.append(val_accuracies)
         train_outputs.append(train_accuracies)
 
@@ -609,6 +607,6 @@ if __name__ == "__main__":
 
     plt.show(block=True)
 
-    with open(f"{best_epoch}_batch_{batch_size}_xyz_rgbd_lr_{lr}.txt", "w+") as outfile:
+    with open(f"{best_epoch}_batch_{batch_size}_xyz_rgbd_lr_{lr}_eval_failures.txt", "w+") as outfile:
         for scene_name in best_errors:
             outfile.write(scene_name[0] + "\n")
